@@ -25,6 +25,10 @@ type CircuitState struct {
 	lastFailure      time.Time
 	openUntil        time.Time
 	halfOpenInFlight bool
+
+	// onRelease, if set, runs after ReleaseHalfOpenProbe unlocks. Tests use
+	// it to act at the instant the probe slot frees.
+	onRelease func()
 }
 
 func (c *CircuitState) Status(now time.Time) Status {
@@ -60,7 +64,11 @@ func (c *CircuitState) TryAcquireHalfOpenProbe(now time.Time) bool {
 func (c *CircuitState) ReleaseHalfOpenProbe() {
 	c.mu.Lock()
 	c.halfOpenInFlight = false
+	hook := c.onRelease
 	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 }
 
 // RecordSuccess resets the breaker to fully closed.

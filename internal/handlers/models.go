@@ -18,11 +18,11 @@ type modelEntry struct {
 // model id (first upstream to declare an id wins attribution).
 func Models(srv *server.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := server.Authenticate(srv.CurrentState().Cfg, r); !ok {
+		st := srv.CurrentState()
+		if _, ok := st.Auth.Authenticate(r); !ok {
 			server.WriteError(w, http.StatusUnauthorized, "invalid or missing credentials")
 			return
 		}
-		st := srv.CurrentState()
 		seen := map[string]bool{}
 		var data []modelEntry
 		for name, up := range st.Cfg.Upstreams {

@@ -3,6 +3,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,6 +67,51 @@ type UpstreamRequest struct {
 	APIKey   string
 	Body     []byte
 	Path     string // resolved path (already applied chatPath/defaultPath logic)
+	MaxBytes int64  // response body limit; <= 0 means unlimited
+}
+
+// ErrResponseTooLarge is returned when an upstream response body exceeds
+// settings.max_response_bytes (P0.9). The message never includes content.
+var ErrResponseTooLarge = errors.New("upstream response exceeds settings.max_response_bytes")
+
+// LimitReader returns a reader that yields at most n bytes of r and then
+// fails with ErrResponseTooLarge if r has more, rather than reporting a
+// clean EOF the way io.LimitReader does: a truncated response must never be
+// mistaken for a complete one. n <= 0 means unlimited.
+func LimitReader(r io.Reader, n int64) io.Reader {
+	if n <= 0 {
+		return r
+	}
+	return &limitReader{r: r, left: n}
+}
+
+type limitReader struct {
+	r    io.Reader
+	left int64 // bytes still allowed; -1 once the limit has been exceeded
+}
+
+func (l *limitReader) Read(p []byte) (int, error) {
+	if l.left < 0 {
+		return 0, ErrResponseTooLarge
+	}
+	// Read one byte past the limit so an over-limit body is detected even
+	// when it ends exactly one read later.
+	if int64(len(p)) > l.left+1 {
+		p = p[:l.left+1]
+	}
+	n, err := l.r.Read(p)
+	l.left -= int64(n)
+	if l.left < 0 {
+		return n - 1, ErrResponseTooLarge
+	}
+	return n, err
+}
+
+// limitedBody applies LimitReader to a response body while still closing
+// the underlying connection.
+type limitedBody struct {
+	io.Reader
+	io.Closer
 }
 
 // forwardResult is a fully read non-streaming upstream response.
@@ -99,9 +145,11 @@ func forward(ctx context.Context, client *http.Client, r UpstreamRequest) (forwa
 		return forwardResult{}, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(LimitReader(resp.Body, r.MaxBytes))
 	if err != nil {
-		return forwardResult{}, fmt.Errorf("read response body: %w", err)
+		// status is kept so the caller can tell an oversized success from
+		// an oversized failure response.
+		return forwardResult{status: resp.StatusCode, header: resp.Header}, fmt.Errorf("read response body: %w", err)
 	}
 	return forwardResult{status: resp.StatusCode, header: resp.Header, body: body}, nil
 }

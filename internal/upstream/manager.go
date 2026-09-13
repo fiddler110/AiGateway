@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -31,14 +33,35 @@ type Manager struct {
 	resilience config.ResilienceConfig
 	client     *http.Client
 	registry   provider.Registry
+	// maxResponseBytes bounds every upstream response body (P0.9).
+	maxResponseBytes int64
+	// sleep and randFloat are the backoff's clock and jitter source,
+	// swappable so tests neither really sleep nor depend on randomness.
+	sleep     func(ctx context.Context, d time.Duration) error
+	randFloat func() float64 // uniform in [0, 1)
+}
+
+// sleepCtx waits for d or until ctx is done, whichever is first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func NewManager(cfg *config.Config, client *http.Client, registry provider.Registry) *Manager {
 	m := &Manager{
-		entries:    map[string]*entry{},
-		resilience: cfg.Resilience,
-		client:     client,
-		registry:   registry,
+		entries:          map[string]*entry{},
+		resilience:       cfg.Resilience,
+		client:           client,
+		registry:         registry,
+		maxResponseBytes: cfg.Settings.MaxResponseBytes,
+		sleep:            sleepCtx,
+		randFloat:        rand.Float64,
 	}
 	for name, up := range cfg.Upstreams {
 		m.entries[name] = &entry{name: name, cfg: up, circuit: &CircuitState{}, health: NewHealthState()}
@@ -51,10 +74,13 @@ func NewManager(cfg *config.Config, client *http.Client, registry provider.Regis
 // reload doesn't reset breaker/health history for still-known upstreams.
 func (m *Manager) WithMergedConfig(cfg *config.Config, client *http.Client, registry provider.Registry) *Manager {
 	next := &Manager{
-		entries:    map[string]*entry{},
-		resilience: cfg.Resilience,
-		client:     client,
-		registry:   registry,
+		entries:          map[string]*entry{},
+		resilience:       cfg.Resilience,
+		client:           client,
+		registry:         registry,
+		maxResponseBytes: cfg.Settings.MaxResponseBytes,
+		sleep:            m.sleep,
+		randFloat:        m.randFloat,
 	}
 	for name, up := range cfg.Upstreams {
 		if old, ok := m.entries[name]; ok {
@@ -145,16 +171,20 @@ type Result struct {
 }
 
 // translatorFor resolves the Translator for an upstream's configured
-// api_format, defaulting to openai (identity) if unset/unknown.
-func (m *Manager) translatorFor(cfg config.UpstreamConfig) provider.Translator {
+// api_format; unset means openai (identity). A format with no registered
+// translator is an error: silently speaking OpenAI to, say, an Anthropic
+// endpoint would send the wrong wire format and misparse the reply (P0.13).
+// config.Validate rejects such formats at load, so this is a backstop.
+func (m *Manager) translatorFor(cfg config.UpstreamConfig) (provider.Translator, error) {
 	format := cfg.APIFormat
 	if format == "" {
 		format = "openai"
 	}
-	if ctor, ok := m.registry[format]; ok {
-		return ctor()
+	ctor, ok := m.registry[format]
+	if !ok {
+		return nil, fmt.Errorf("no translator registered for api_format %q", format)
 	}
-	return m.registry["openai"]()
+	return ctor(), nil
 }
 
 // Send performs a non-streaming chat call, trying candidates in fallback
@@ -176,7 +206,13 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 				break // try next upstream, not another attempt on this one
 			}
 
-			translator := m.translatorFor(e.cfg)
+			translator, terr := m.translatorFor(e.cfg)
+			if terr != nil {
+				if halfOpen {
+					e.circuit.ReleaseHalfOpenProbe()
+				}
+				return Result{}, fmt.Errorf("upstream %s: %w", name, terr)
+			}
 			nativeBody, defaultPath, terr := translator.ToUpstream(req)
 			if terr != nil {
 				if halfOpen {
@@ -190,7 +226,15 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 				APIKey:   apiKeyFor(name),
 				Body:     nativeBody,
 				Path:     chatPath(e.cfg, defaultPath),
+				MaxBytes: m.maxResponseBytes,
 			})
+			if errors.Is(ferr, ErrResponseTooLarge) && !isUpstreamFailure(res.status) {
+				// The upstream is reachable and answered; it just answered
+				// too much. Retrying or falling back would repeat a runaway
+				// generation, so this is terminal and not a circuit failure.
+				e.circuit.RecordSuccess()
+				return Result{}, fmt.Errorf("upstream %s: %w", name, ferr)
+			}
 			if ferr == nil && isUpstreamFailure(res.status) {
 				ferr = fmt.Errorf("upstream %s returned status %d", name, res.status)
 			}
@@ -200,7 +244,13 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 					e.circuit.ReleaseHalfOpenProbe()
 				}
 				lastErr = ferr
-				m.backoff(ctx, attempt)
+				if attempt < m.resilience.RetryAttempts {
+					// Never after the final attempt: the next step is a
+					// different upstream (or giving up), not this one again.
+					if err := m.sleep(ctx, m.backoffDelay(attempt)); err != nil {
+						return Result{}, fmt.Errorf("retry backoff for upstream %s: %w (last error: %v)", name, err, lastErr)
+					}
+				}
 				continue
 			}
 
@@ -226,7 +276,8 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 type StreamResult struct {
 	Status int
 	Header http.Header
-	// Body is the live upstream stream; the caller must close it.
+	// Body is the live upstream stream; the caller must close it. Reading
+	// more than settings.max_response_bytes fails with ErrResponseTooLarge.
 	Body io.ReadCloser
 	// ErrorBody is the upstream's error body, read to at most
 	// maxErrorBodyBytes, with the connection already closed.
@@ -236,7 +287,8 @@ type StreamResult struct {
 
 // SendStream performs a streaming chat call, trying candidates in fallback
 // order with no retry-within-upstream (a partially-streamed response can't
-// be safely retried once bytes may have reached the client). Success is
+// be safely retried once bytes may have reached the client), so it never
+// backs off: retry_attempts and retry_delay_seconds apply to Send only. Success is
 // recorded once response headers/status are received (before any body is
 // read) — a deliberate deviation from the Python reference, which recorded
 // success per received chunk and could record success just before an
@@ -259,7 +311,13 @@ func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chat
 			continue
 		}
 
-		translator := m.translatorFor(e.cfg)
+		translator, terr := m.translatorFor(e.cfg)
+		if terr != nil {
+			if halfOpen {
+				e.circuit.ReleaseHalfOpenProbe()
+			}
+			return StreamResult{}, fmt.Errorf("upstream %s: %w", name, terr)
+		}
 		nativeBody, defaultPath, terr := translator.ToUpstream(req)
 		if terr != nil {
 			if halfOpen {
@@ -298,7 +356,13 @@ func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chat
 			resp.Body.Close()
 			return StreamResult{Status: resp.StatusCode, Header: resp.Header, ErrorBody: errBody, ServedBy: name}, nil
 		}
-		return StreamResult{Status: resp.StatusCode, Header: resp.Header, Body: resp.Body, ServedBy: name}, nil
+		// Reads past maxResponseBytes fail with ErrResponseTooLarge (P0.9).
+		// The limit bounds native bytes read off the network; the stream
+		// translator then turns them into canonical OpenAI SSE (P0.13), so
+		// the handler never sees the provider's wire format.
+		native := limitedBody{Reader: LimitReader(resp.Body, m.maxResponseBytes), Closer: resp.Body}
+		body := newTranslatedStream(native, translator.NewStreamTranslator(), name)
+		return StreamResult{Status: resp.StatusCode, Header: resp.Header, Body: body, ServedBy: name}, nil
 	}
 	if lastErr != nil {
 		return StreamResult{}, fmt.Errorf("%w: %v", ErrAllUpstreamsUnavailable, lastErr)
@@ -310,13 +374,23 @@ func cooldown(r config.ResilienceConfig) time.Duration {
 	return time.Duration(r.CircuitBreaker.CooldownSeconds * float64(time.Second))
 }
 
-// backoff sleeps a linear delay between retry attempts on the SAME
-// upstream (not between different upstreams in the fallback list), honoring
-// context cancellation.
-func (m *Manager) backoff(ctx context.Context, attempt int) {
-	delay := time.Duration(float64(attempt+1)) * time.Second
-	select {
-	case <-time.After(delay):
-	case <-ctx.Done():
+// jitterFraction spreads each backoff delay uniformly over ±20% so clients
+// that failed together don't retry in lockstep.
+const jitterFraction = 0.2
+
+// backoffDelay is the wait before retry attempt+1 on the SAME upstream:
+// linear, retry_delay_seconds × (attempt+1) as in the Python reference, then
+// jittered by ±jitterFraction. It is never used between different upstreams
+// in the fallback list or after the final attempt.
+func (m *Manager) backoffDelay(attempt int) time.Duration {
+	base := m.resilience.RetryDelaySeconds * float64(attempt+1)
+	jitter := 1 + jitterFraction*(2*m.randFloat()-1)
+	d := base * jitter * float64(time.Second)
+	if !(d > 0) { // zero, negative, or NaN
+		return 0
 	}
+	if d >= math.MaxInt64 {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(d)
 }

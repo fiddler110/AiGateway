@@ -18,6 +18,20 @@ import (
 	"github.com/scottymacleod/aigateway/internal/server"
 )
 
+// newHTTPServer bounds header reads and idle keep-alives against
+// slowloris-style connection exhaustion (P0.14). WriteTimeout and
+// ReadTimeout stay unset: they would cut off long streams and large uploads,
+// which settings.stream_timeout, request_timeout and max_request_bytes bound
+// instead.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to gateway config file")
 	flag.Parse()
@@ -42,7 +56,7 @@ func main() {
 	srv.Swap(initialState)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Settings.ListenHost, cfg.Settings.ListenPort)
-	httpServer := &http.Server{Addr: addr, Handler: app.NewRouter(srv)}
+	httpServer := newHTTPServer(addr, app.NewRouter(srv))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

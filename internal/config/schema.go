@@ -3,12 +3,16 @@
 // Security invariant: this schema never has a field capable of holding raw
 // API key material. Upstreams and users reference environment variable
 // NAMES (api_key_env, upstream_key_env, gateway_key is the gateway's own
-// shared secret and is expected to live in the config file or be overridden
-// via env — see settings.auth_key); actual upstream provider keys always
+// shared secret and can come from the AIGATEWAY_AUTH_KEY env var instead of
+// settings.auth_key, or per user from gateway_key_env); actual upstream provider keys always
 // come from the process environment, read fresh at request time.
 package config
 
-import "github.com/scottymacleod/aigateway/internal/secret"
+import (
+	"net/netip"
+
+	"github.com/scottymacleod/aigateway/internal/secret"
+)
 
 // UpstreamConfig describes one configured upstream AI provider/runtime.
 type UpstreamConfig struct {
@@ -32,8 +36,13 @@ type ModelRoute struct {
 // UserConfig describes one entry in the multi-user auth table. Presence of
 // ANY user makes this the sole auth mechanism (mutually exclusive with
 // settings.auth_key).
+//
+// GatewayKeyEnv names an environment variable holding the user's gateway key,
+// as an alternative to GatewayKey. Parse resolves it into GatewayKey before
+// validation; setting both is an error.
 type UserConfig struct {
 	GatewayKey     secret.String `yaml:"gateway_key"`
+	GatewayKeyEnv  string        `yaml:"gateway_key_env"`
 	UpstreamKeyEnv string        `yaml:"upstream_key_env"`
 	Upstream       string        `yaml:"upstream"`
 }
@@ -78,18 +87,36 @@ type RedisConfig struct {
 }
 
 // GatewaySettings holds gateway-wide operational settings.
+//
+// MaxResponseBytes bounds how many bytes of one upstream response body
+// (non-streaming, buffered stream, or passthrough stream total) the gateway
+// reads; exceeding it is an error, never a silent truncation. StreamTimeout
+// bounds the total duration of a streaming request, in seconds like
+// RequestTimeout (which covers non-streaming requests only). See P0.9.
 type GatewaySettings struct {
-	ListenPort        int           `yaml:"listen_port"`
-	ListenHost        string        `yaml:"listen_host"`
-	DefaultUpstream   string        `yaml:"default_upstream"`
-	AuditDB           string        `yaml:"audit_db"`
-	RequestTimeout    float64       `yaml:"request_timeout"`
-	RetentionDays     int           `yaml:"retention_days"`
-	LogLevel          string        `yaml:"log_level"`
-	AuthKey           secret.String `yaml:"auth_key"`
-	MaxRequestBytes   int64         `yaml:"max_request_bytes"`
-	StreamBuffer      bool          `yaml:"stream_buffer"`
-	TrustProxyHeaders bool          `yaml:"trust_proxy_headers"`
+	ListenPort       int           `yaml:"listen_port"`
+	ListenHost       string        `yaml:"listen_host"`
+	DefaultUpstream  string        `yaml:"default_upstream"`
+	AuditDB          string        `yaml:"audit_db"`
+	RequestTimeout   float64       `yaml:"request_timeout"`
+	RetentionDays    int           `yaml:"retention_days"`
+	LogLevel         string        `yaml:"log_level"`
+	AuthKey          secret.String `yaml:"auth_key"`
+	MaxRequestBytes  int64         `yaml:"max_request_bytes"`
+	MaxResponseBytes int64         `yaml:"max_response_bytes"`
+	StreamTimeout    float64       `yaml:"stream_timeout"`
+	StreamBuffer     bool          `yaml:"stream_buffer"`
+	// TrustedProxies lists CIDRs (or bare IPs) of reverse proxies whose
+	// X-Forwarded-For entries are believed. Empty means XFF is ignored.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// TrustProxyHeaders is the removed boolean predecessor of TrustedProxies.
+	// It is decoded only so Validate can reject it with a pointer to
+	// trusted_proxies instead of a generic unknown-field error.
+	TrustProxyHeaders *bool `yaml:"trust_proxy_headers"`
+
+	// TrustedProxyPrefixes is TrustedProxies parsed by Validate. A config
+	// that never went through Validate trusts no proxy.
+	TrustedProxyPrefixes []netip.Prefix `yaml:"-"`
 }
 
 // Config is the top-level gateway configuration, loaded from YAML.
@@ -115,13 +142,15 @@ func Defaults() Config {
 		ModelRoutes: []ModelRoute{},
 		Middleware:  []string{},
 		Settings: GatewaySettings{
-			ListenPort:      8080,
-			ListenHost:      "0.0.0.0",
-			AuditDB:         "logs/gateway.db",
-			RequestTimeout:  300.0,
-			RetentionDays:   90,
-			LogLevel:        "info",
-			MaxRequestBytes: 10 * 1024 * 1024,
+			ListenPort:       8080,
+			ListenHost:       "0.0.0.0",
+			AuditDB:          "logs/gateway.db",
+			RequestTimeout:   300.0,
+			RetentionDays:    90,
+			LogLevel:         "info",
+			MaxRequestBytes:  10 * 1024 * 1024,
+			MaxResponseBytes: 32 * 1024 * 1024,
+			StreamTimeout:    600.0,
 		},
 		Cache: CacheConfig{
 			Enabled:    true,

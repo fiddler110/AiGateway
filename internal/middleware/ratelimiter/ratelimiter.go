@@ -6,6 +6,7 @@ package ratelimiter
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -87,6 +88,10 @@ func (m *Middleware) Process(_ context.Context, _ *chatmodel.ChatRequest, gctx *
 		m.requests[key] = times
 		gctx.Blocked = true
 		gctx.BlockReason = "rate_limiter: request rate limit exceeded"
+		gctx.BlockStatus = http.StatusTooManyRequests
+		// times is oldest first; the block lifts when enough of the
+		// oldest leave the window to get under rpm.
+		gctx.RetryAfter = times[len(times)-m.rpm].Add(window).Sub(now)
 		return nil
 	}
 	m.requests[key] = append(times, now)

@@ -89,7 +89,7 @@ go run ./cmd/aigateway -config config.yaml
 ## Known traps (as of 2026-09-12; remove each as it's fixed)
 
 - Several config fields are accepted but do nothing yet: `cache`, `redis`, `audit_db`,
-  `health_check`, `retry_delay_seconds` (P0.15). Don't assume a config key means the
-  feature exists.
-- `StreamTranslator` is defined but never called. Streams are forwarded raw (P0.13).
+  `health_check` (P0.15). Don't assume a config key means the feature exists.
+- Streaming is only forced into buffered mode for `secrets_scanner`, so with just
+  `pii_redactor`/`content_policy` enabled, passthrough streams go out unredacted (P0.17).
 - `web/` is an empty placeholder for the P1.7 dashboard.

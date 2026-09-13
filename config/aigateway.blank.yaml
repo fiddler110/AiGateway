@@ -8,15 +8,16 @@ upstreams: {}
   # openai:
   #   base_url: "https://api.openai.com/v1"
   #   api_key_env: "OPENAI_API_KEY"
-  #   auth_type: bearer
-  #   api_format: openai
+  #   auth_type: bearer         # bearer (default) | x-api-key | none
+  #   api_format: openai        # openai (default); anthropic and gemini are
+  #                             # rejected as not yet supported (P1.1, P1.2)
   #   models: ["gpt-4o", "gpt-4o-mini"]
-  # anthropic:
+  # anthropic:                  # not yet supported: fails validation until P1.1
   #   base_url: "https://api.anthropic.com/v1"
   #   api_key_env: "ANTHROPIC_API_KEY"
   #   api_format: anthropic
   #   models: ["claude-opus-4", "claude-sonnet-4"]
-  # gemini:
+  # gemini:                     # not yet supported: fails validation until P1.2
   #   base_url: "https://generativelanguage.googleapis.com/v1beta"
   #   api_key_env: "GEMINI_API_KEY"
   #   api_format: gemini
@@ -45,6 +46,17 @@ middleware: []
   # - token_counter
 
 middleware_config: {}
+  # context_pseudonymizer:
+  #   # Pseudonym sessions keep a real<->fake map across requests so fakes
+  #   # from earlier turns still reverse. They persist only for users-table
+  #   # identities. With settings.auth_key or open auth the client ID is the
+  #   # spoofable x-client-id header, so each request gets its own session.
+  #   # RISK: true persists sessions per x-client-id anyway, and any client
+  #   # that sends another client's x-client-id can have that client's REAL
+  #   # IPs, hostnames, and passwords reversed into its own responses. Only
+  #   # enable if every client that can reach the gateway is trusted.
+  #   # Boolean, default false.
+  #   persist_sessions_for_unauthenticated: false
 
 settings:
   listen_port: 8080
@@ -54,12 +66,47 @@ settings:
   request_timeout: 300.0
   retention_days: 90
   log_level: info
-  # auth_key: "changeme"
+  # Shared gateway key, used only when users is empty. Use a long random
+  # value; the placeholder "changeme" is rejected at load.
+  # The AIGATEWAY_AUTH_KEY environment variable overrides this value, so the
+  # key doesn't have to live in this file. If AIGATEWAY_AUTH_KEY is set but
+  # empty, the config is rejected.
+  # auth_key: ""
   max_request_bytes: 10485760
+  # Largest upstream response body the gateway will read, in bytes: the whole
+  # body for non-streaming requests, the whole stream for streaming ones. A
+  # larger response fails with an error; it is never silently truncated.
+  # Must be > 0. Default 33554432 (32 MiB).
+  max_response_bytes: 33554432
+  # Maximum total duration of a streaming request, in seconds (like
+  # request_timeout, which covers non-streaming requests only). When it
+  # expires the upstream read is cancelled and the client gets an SSE error
+  # event. Must be > 0. Default 600.0.
+  stream_timeout: 600.0
   stream_buffer: false
-  trust_proxy_headers: false
+  # Reverse proxies (CIDRs or single IPs) whose X-Forwarded-For entries are
+  # believed when working out a client's source IP (used to rate-limit
+  # anonymous clients). The gateway walks X-Forwarded-For from the right,
+  # starting at the connecting address, and stops at the first address not
+  # in this list. Anything left of that is client-supplied and ignored.
+  # Empty (default) ignores X-Forwarded-For entirely. This replaces the
+  # removed trust_proxy_headers setting, which is now rejected at load.
+  trusted_proxies: []
+  # trusted_proxies: ["127.0.0.1", "10.0.0.0/8", "fd00::/8"]
 
 users: {}
+  # Per-user keys. When any user is set, this table is the only auth.
+  # Each gateway_key must be non-empty and unique, upstream (optional) must
+  # name a declared upstream, and usernames must stay distinct after
+  # sanitization to [A-Za-z0-9._-] (so "bob!" and "bob_" conflict).
+  # Instead of gateway_key, gateway_key_env can name an environment variable
+  # holding the key. Set one or the other, not both; a named variable that is
+  # unset or empty is rejected at load.
+  # alice:
+  #   gateway_key: "long-random-value"
+  #   upstream: "openai"
+  # bob:
+  #   gateway_key_env: "AIGATEWAY_KEY_BOB"
 
 cache:
   enabled: true
@@ -72,10 +119,17 @@ redis:
   enabled: false
 
 resilience:
+  # Extra attempts on the same upstream after a failure (5xx, network error),
+  # before falling back to the next upstream. 0 disables retries. Non-streaming
+  # requests only; streams go straight to the next fallback. Must be >= 0.
   retry_attempts: 2
+  # Linear backoff: waits retry_delay_seconds x attempt (1x, 2x, ...) with
+  # +/-20% jitter. Never waits after the last attempt. Must be >= 0.
   retry_delay_seconds: 1.0
   circuit_breaker:
+    # Consecutive failures before the circuit opens. Must be > 0.
     failure_threshold: 5
+    # Seconds an open circuit waits before a half-open probe. Must be >= 0.
     cooldown_seconds: 60
   health_check:
     enabled: true

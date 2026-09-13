@@ -8,23 +8,32 @@ import (
 )
 
 func toInt(v any) (int, bool) {
-	f, ok := v.(float64)
+	n, ok := v.(json.Number)
 	if !ok {
 		return 0, false
 	}
-	return int(f), true
+	i, err := n.Int64()
+	if err != nil {
+		f, ferr := n.Float64()
+		if ferr != nil {
+			return 0, false
+		}
+		i = int64(f)
+	}
+	return int(i), true
 }
 
 // applyResponsePipeline extracts usage into gctx.Scratch, then runs the
-// response-phase middleware pipeline over each choice's message content
-// (mirroring the reference's per-choice scan), mutating the response body
-// in place. On any middleware blocking, the caller should surface the block
-// instead of returning the (possibly partially rewritten) body. Non-JSON or
-// unrecognized bodies are passed through unchanged, matching the
-// reference's tolerant behavior for non-standard upstream responses.
+// response-phase middleware pipeline once over every model-generated string
+// field of every choice (responseText), writing rewrites back into the
+// body. On any middleware blocking, the caller should surface the block
+// instead of returning the body. A body the pipeline didn't change is
+// returned byte for byte. Non-JSON or unrecognized bodies are passed through
+// unchanged, matching the reference's tolerant behavior for non-standard
+// upstream responses.
 func applyResponsePipeline(ctx context.Context, pipe *pipeline.Pipeline, gctx *pipeline.GatewayContext, body []byte) ([]byte, error) {
-	var parsed map[string]any
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	parsed, err := decodeChunk(body)
+	if err != nil {
 		return body, nil
 	}
 
@@ -37,37 +46,42 @@ func applyResponsePipeline(ctx context.Context, pipe *pipeline.Pipeline, gctx *p
 		}
 	}
 
-	choices, ok := parsed["choices"].([]any)
-	if !ok || pipe == nil {
+	if pipe == nil {
 		return body, nil
 	}
 
+	var rt responseText
+	choices, _ := parsed["choices"].([]any)
 	for _, c := range choices {
-		choice, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
+		choice, _ := c.(map[string]any)
 		message, ok := choice["message"].(map[string]any)
 		if !ok {
 			continue
 		}
-		content, ok := message["content"].(string)
-		if !ok {
-			continue
+		rt.addStringFields(message)
+		calls, _ := message["tool_calls"].([]any)
+		for _, tc := range calls {
+			call, _ := tc.(map[string]any)
+			addFunctionArguments(&rt, call["function"])
 		}
-		newContent, err := pipe.RunResponse(ctx, content, gctx)
-		if err != nil {
-			return body, err
-		}
-		message["content"] = newContent
-		if gctx.Blocked {
-			break
-		}
+		addFunctionArguments(&rt, message["function_call"]) // legacy single call
 	}
 
-	out, err := json.Marshal(parsed)
+	if err := rt.run(ctx, pipe, gctx); err != nil || gctx.Blocked || !rt.changed {
+		return body, err
+	}
+	out, err := marshalJSON(parsed)
 	if err != nil {
-		return body, nil
+		return body, err
 	}
 	return out, nil
+}
+
+// addFunctionArguments adds fn.arguments when fn is a function object with
+// string arguments.
+func addFunctionArguments(rt *responseText, fn any) {
+	f, _ := fn.(map[string]any)
+	if args, ok := f["arguments"].(string); ok {
+		rt.addArguments(args, func(s string) { f["arguments"] = s })
+	}
 }

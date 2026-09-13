@@ -20,14 +20,17 @@ type patternReplacement struct {
 // builtinPatterns are applied in order; each pattern uses fixed-width digit
 // groups (not unbounded quantifiers) to keep matching linear-time even
 // though Go's RE2 engine is already immune to catastrophic backtracking.
+// Cards run before phone: the phone pattern has no leading word boundary (so
+// "(555) 123-4567" matches), so it would otherwise claim the last ten digits
+// of an unseparated card number, leaving "411111[PHONE]".
 var builtinPatterns = []patternReplacement{
 	{regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`), "[EMAIL]"},
-	{regexp.MustCompile(`(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b`), "[PHONE]"},
-	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), "[SSN]"},
 	// 16-digit card: 4-4-4-4 with optional space/dash separators.
 	{regexp.MustCompile(`\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b`), "[CARD]"},
 	// 15-digit Amex: 4-6-5.
 	{regexp.MustCompile(`\b\d{4}[ -]?\d{6}[ -]?\d{5}\b`), "[CARD]"},
+	{regexp.MustCompile(`(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b`), "[PHONE]"},
+	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), "[SSN]"},
 }
 
 type Middleware struct {

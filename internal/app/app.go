@@ -37,6 +37,7 @@ func BuildState(cfg *config.Config, client *http.Client, registry provider.Regis
 		Pipeline:    pipe,
 		UpstreamMgr: upstream.NewManager(cfg, client, registry),
 		Registry:    registry,
+		Auth:        server.NewAuthenticator(cfg),
 	}, nil
 }
 
@@ -46,5 +47,6 @@ func NewRouter(srv *server.Server) http.Handler {
 	mux.Post("/v1/chat/completions", handlers.Chat(srv))
 	mux.Get("/v1/models", handlers.Models(srv))
 	mux.Get("/health", handlers.Health(srv))
+	mux.Get("/health/detail", handlers.HealthDetail(srv))
 	return mux
 }

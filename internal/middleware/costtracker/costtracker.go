@@ -6,6 +6,7 @@ package costtracker
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -158,6 +159,10 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 		m.mu.Unlock()
 		gctx.Blocked = true
 		gctx.BlockReason = fmt.Sprintf("cost_tracker: monthly budget exceeded ($%.2f spent of $%.2f budget)", current, budget)
+		gctx.BlockStatus = http.StatusTooManyRequests
+		// Spend resets at the start of the next UTC month.
+		u := now.UTC()
+		gctx.RetryAfter = time.Date(u.Year(), u.Month()+1, 1, 0, 0, 0, 0, time.UTC).Sub(u)
 		return nil
 	}
 
@@ -177,9 +182,14 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 	return nil
 }
 
+// AccountsWholeResponse marks cost_tracker as pipeline.ResponseAccounting:
+// ProcessResponse gets the whole response's text once, not once per field.
+func (m *Middleware) AccountsWholeResponse() {}
+
 // ProcessResponse reconciles the pre-charged estimate against actual
-// provider-reported usage exactly once per request (idempotency guard: the
-// response pipeline may run once per choice in a multi-choice response).
+// provider-reported usage exactly once per request. The pipeline calls it
+// once per response (ResponseAccounting); CostFinalized guards against a
+// second response pass anyway.
 func (m *Middleware) ProcessResponse(_ context.Context, text string, gctx *pipeline.GatewayContext) (string, error) {
 	if gctx.Scratch.CostFinalized {
 		return text, nil

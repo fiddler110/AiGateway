@@ -14,6 +14,11 @@ func TestRedact(t *testing.T) {
 		{"ssn", "SSN: 123-45-6789", "SSN: [SSN]"},
 		{"card 16-digit", "card 4111 1111 1111 1111 on file", "card [CARD] on file"},
 		{"card amex 15-digit", "amex 3782 822463 10005 here", "amex [CARD] here"},
+		// P0.14: the phone pattern used to run first and claim the last ten
+		// digits of an unseparated card ("411111[PHONE]").
+		{"card 16-digit unseparated", "card 4111111111111111 on file", "card [CARD] on file"},
+		{"card amex unseparated", "amex 378282246310005 here", "amex [CARD] here"},
+		{"phone with parens", "call (555) 123-4567 now", "call [PHONE] now"},
 		{"no PII", "just a normal sentence", "just a normal sentence"},
 	}
 	for _, tc := range cases {

@@ -219,6 +219,16 @@ func OversizedChat(n int) Response {
 // SSE frame is its own Chunk, so callers can adjust Delay or split Data to
 // test frame boundaries.
 func OpenAISSE(deltas ...string) Response {
+	maps := make([]map[string]any, len(deltas))
+	for i, d := range deltas {
+		maps[i] = map[string]any{"content": d}
+	}
+	return OpenAISSEDeltas(maps...)
+}
+
+// OpenAISSEDeltas is OpenAISSE with arbitrary delta objects, e.g.
+// {"tool_calls": [...]}.
+func OpenAISSEDeltas(deltas ...map[string]any) Response {
 	frame := func(v any) string {
 		data, _ := json.Marshal(v)
 		return "data: " + string(data) + "\n\n"
@@ -234,7 +244,7 @@ func OpenAISSE(deltas ...string) Response {
 	}
 	var chunks []Chunk
 	for _, d := range deltas {
-		chunks = append(chunks, Chunk{Data: frame(chunk(map[string]any{"content": d}, nil))})
+		chunks = append(chunks, Chunk{Data: frame(chunk(d, nil))})
 	}
 	final := chunk(map[string]any{}, "stop")
 	final["usage"] = map[string]any{"prompt_tokens": 5, "completion_tokens": len(deltas), "total_tokens": 5 + len(deltas)}

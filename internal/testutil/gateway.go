@@ -10,6 +10,7 @@ import (
 	"github.com/scottymacleod/aigateway/internal/app"
 	"github.com/scottymacleod/aigateway/internal/config"
 	"github.com/scottymacleod/aigateway/internal/httpclient"
+	"github.com/scottymacleod/aigateway/internal/provider"
 	"github.com/scottymacleod/aigateway/internal/server"
 )
 
@@ -26,13 +27,21 @@ type Gateway struct {
 // The server is closed on test cleanup.
 func NewGateway(t testing.TB, yamlConfig string) *Gateway {
 	t.Helper()
+	return NewGatewayWithRegistry(t, yamlConfig, app.NewRegistry())
+}
+
+// NewGatewayWithRegistry is NewGateway with a caller-supplied provider
+// registry, so a test can install its own translator under an api_format
+// name without touching the production registry.
+func NewGatewayWithRegistry(t testing.TB, yamlConfig string, registry provider.Registry) *Gateway {
+	t.Helper()
 	cfg, err := config.Parse([]byte(yamlConfig))
 	if err != nil {
 		t.Fatalf("parse gateway config: %v", err)
 	}
 	client := httpclient.New()
 	srv := server.New(client)
-	st, err := app.BuildState(cfg, client, app.NewRegistry())
+	st, err := app.BuildState(cfg, client, registry)
 	if err != nil {
 		t.Fatalf("build gateway state: %v", err)
 	}
@@ -40,8 +49,12 @@ func NewGateway(t testing.TB, yamlConfig string) *Gateway {
 
 	ts := httptest.NewServer(app.NewRouter(srv))
 	t.Cleanup(func() {
-		ts.Close()
+		ts.Close() // waits for in-flight requests
 		client.CloseIdleConnections()
+		// Releases open files (audit_log) so t.TempDir cleanup can remove them.
+		if err := st.Pipeline.Close(); err != nil {
+			t.Errorf("close pipeline: %v", err)
+		}
 	})
 	return &Gateway{Server: ts, Srv: srv}
 }

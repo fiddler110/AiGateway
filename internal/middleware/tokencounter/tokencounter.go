@@ -61,9 +61,14 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 	return nil
 }
 
+// AccountsWholeResponse marks token_counter as pipeline.ResponseAccounting:
+// ProcessResponse gets the whole response's text once, not once per field.
+func (m *Middleware) AccountsWholeResponse() {}
+
 // ProcessResponse reconciles the estimate against actual provider-reported
-// usage exactly once per request (idempotency guard: the response pipeline
-// may run once per choice in a multi-choice response).
+// usage exactly once per request. The pipeline calls it once per response
+// (ResponseAccounting); TokensFinalized guards against a second response
+// pass anyway.
 func (m *Middleware) ProcessResponse(_ context.Context, text string, gctx *pipeline.GatewayContext) (string, error) {
 	if gctx.Scratch.TokensFinalized {
 		return text, nil

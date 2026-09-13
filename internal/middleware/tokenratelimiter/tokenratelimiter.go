@@ -7,6 +7,7 @@ package tokenratelimiter
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -29,7 +30,14 @@ type Middleware struct {
 
 	mu      sync.Mutex
 	windows map[string][]weightedEntry
+	calls   int // periodic-cleanup counter
 }
+
+// cleanupEvery and staleAfter match rate_limiter's idle-key eviction.
+const (
+	cleanupEvery = 500
+	staleAfter   = 10 * time.Minute
+)
 
 func New(cfg map[string]any) (pipeline.Middleware, error) {
 	m := &Middleware{
@@ -90,8 +98,21 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 	key := rateKey(gctx, m.useSourceIPFallback)
 	now := m.now()
 
+	if estimated > m.tpm {
+		// No amount of waiting admits this request, so a 429 with
+		// Retry-After would have a client retry forever.
+		gctx.Blocked = true
+		gctx.BlockReason = "token_rate_limiter: request exceeds the token rate limit"
+		return nil
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.calls++
+	if m.calls%cleanupEvery == 0 {
+		m.cleanupLocked(now)
+	}
 
 	entries := pruneOld(m.windows[key], now)
 	sum := 0
@@ -102,10 +123,37 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 		m.windows[key] = entries
 		gctx.Blocked = true
 		gctx.BlockReason = "token_rate_limiter: token rate limit exceeded"
+		gctx.BlockStatus = http.StatusTooManyRequests
+		gctx.RetryAfter = retryAfter(entries, sum+estimated-m.tpm, now)
 		return nil
 	}
 	m.windows[key] = append(entries, weightedEntry{at: now, tokens: estimated})
 	return nil
+}
+
+// retryAfter is how long until the oldest entries (in time order) holding at
+// least excess tokens leave the window.
+func retryAfter(entries []weightedEntry, excess int, now time.Time) time.Duration {
+	freed := 0
+	for _, e := range entries {
+		freed += e.tokens
+		if freed >= excess {
+			return e.at.Add(window).Sub(now)
+		}
+	}
+	return window
+}
+
+// cleanupLocked removes keys whose most recent entry is older than
+// staleAfter, so IP-keyed anonymous clients don't grow the map forever.
+// Caller must hold m.mu.
+func (m *Middleware) cleanupLocked(now time.Time) {
+	staleCutoff := now.Add(-staleAfter)
+	for key, entries := range m.windows {
+		if len(entries) == 0 || entries[len(entries)-1].at.Before(staleCutoff) {
+			delete(m.windows, key)
+		}
+	}
 }
 
 func pruneOld(entries []weightedEntry, now time.Time) []weightedEntry {

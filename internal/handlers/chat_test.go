@@ -144,6 +144,68 @@ func TestChatRelaysUpstreamClientErrors(t *testing.T) {
 	}
 }
 
+// P0.7 + P0.8: when the upstream is unreachable, Go's net error is
+// `Post "http://127.0.0.1:PORT/...": dial tcp ...` — quotes that broke the
+// hand-built SSE JSON, and a host:port that leaked internal topology. The
+// client must get a parseable, generic error carrying the request ID.
+func TestChatUpstreamFailureIsGenericAndValidJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		stream, buffered bool
+	}{
+		{"non-stream", false, false},
+		{"stream passthrough", true, false},
+		{"stream buffered", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := testutil.NewFakeUpstream(t)
+			hostPort := strings.TrimPrefix(fake.URL, "http://")
+			gw := streamGateway(t, fake, tc.buffered, "")
+			fake.Close() // connection refused from here on
+
+			res := gw.PostChat(t, chatBody(tc.stream))
+			reqID := res.Header.Get("x-request-id")
+			if reqID == "" {
+				t.Error("missing x-request-id header")
+			}
+			for _, leak := range []string{hostPort, "127.0.0.1", "http://", "dial tcp"} {
+				if strings.Contains(res.Body, leak) {
+					t.Errorf("client body leaks %q: %q", leak, res.Body)
+				}
+			}
+
+			var payloads []string
+			if tc.stream {
+				if res.Status != http.StatusOK {
+					t.Fatalf("status %d, body %q", res.Status, res.Body)
+				}
+				for _, line := range strings.Split(res.Body, "\n") {
+					if p, ok := strings.CutPrefix(line, "data: "); ok && p != "[DONE]" {
+						payloads = append(payloads, p)
+					}
+				}
+				if len(payloads) != 1 {
+					t.Fatalf("want one error event, got %d; body %q", len(payloads), res.Body)
+				}
+			} else {
+				if res.Status != http.StatusServiceUnavailable {
+					t.Fatalf("status %d, body %q", res.Status, res.Body)
+				}
+				payloads = []string{res.Body}
+			}
+			for _, p := range payloads {
+				env := decodeError(t, p)
+				if env.Error.Code != http.StatusServiceUnavailable || env.Error.Type != "api_error" {
+					t.Errorf("error = %+v, want code 503 type api_error", env.Error)
+				}
+				if reqID != "" && !strings.Contains(env.Error.Message, reqID) {
+					t.Errorf("message %q lacks request ID %q", env.Error.Message, reqID)
+				}
+			}
+		})
+	}
+}
+
 func TestChatStreamingSuccessStillStreams(t *testing.T) {
 	gw := gatewayFor(t, testutil.NewFakeUpstream(t, testutil.OpenAISSE("hel", "lo")))
 

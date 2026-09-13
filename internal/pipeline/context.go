@@ -2,10 +2,7 @@
 // and response passes through for DLP, accounting, and policy enforcement.
 package pipeline
 
-import (
-	"sort"
-	"strings"
-)
+import "time"
 
 // Scratch holds fields that specific middlewares read/write to communicate
 // with each other and with the handler. Unlike the Python reference's
@@ -28,48 +25,60 @@ type Scratch struct {
 	SecretsFlaggedResp  []string
 	PIIRedacted         int
 	PIIRedactedResponse bool
-	CostFinalized       bool // idempotency guard: response pipeline may run once per choice
+	CostFinalized       bool // idempotency guard; the pipeline already calls accounting middleware once per response (ResponseAccounting)
 	TokensFinalized     bool
 	RequestModel        string
+	MessageCount        int  // captured by audit_log's request phase
+	Stream              bool // captured by audit_log's request phase
+	AuditCaptured       bool // audit_log's request phase ran (it doesn't if an earlier middleware blocked)
 }
 
 // GatewayContext is the mutable per-request state threaded through the
 // entire pipeline. It is request-local and never shared across goroutines,
 // so it needs no internal synchronization.
 type GatewayContext struct {
-	ClientID    string
+	ClientID string
+	// Authenticated is true only when ClientID is a verified users-table
+	// identity. In shared-auth_key and open modes ClientID comes from the
+	// advisory, spoofable x-client-id header and this is false, so nothing
+	// security-relevant may be keyed on ClientID (see P0.10).
+	Authenticated bool
+
 	Upstream    string // mutated by the upstream manager to reflect the upstream that actually served the request
 	SourceIP    string
 	Blocked     bool
 	BlockReason string
+	// BlockStatus is the HTTP status for a block; 0 means 400. Rate-limit
+	// and budget blocks set 429 with RetryAfter (P0.14); content and DLP
+	// blocks leave both zero.
+	BlockStatus int
+	RetryAfter  time.Duration
 
 	// BlockMiddleware/BlockDirection are set once, by whichever middleware
 	// first blocks the request, and never overwritten thereafter.
 	BlockMiddleware string
 	BlockDirection  string // "request" | "response"
 
+	// Outcome fields, set by the handler before Pipeline.Finish runs.
+	// RequestID matches the x-request-id response header. ServedBy is the
+	// upstream that answered (any status), or "" if none did, unlike
+	// Upstream, which starts as the first route candidate. Status is the
+	// HTTP status sent, or for a stream that began with 200 and then failed,
+	// the code of its SSE error event. StartedAt is when the handler began.
+	RequestID string
+	ServedBy  string
+	Status    int
+	StartedAt time.Time
+
 	Scratch Scratch
 }
 
-// ReverseSubstitute applies gctx.Scratch.ReverseMap (fake -> real) to text,
-// longest-fake-first to avoid partial-substring collisions. Used by
-// passthrough-mode streaming to reverse pseudonymization on each complete
-// line as it's forwarded, without waiting for the full response.
-func (gctx *GatewayContext) ReverseSubstitute(text string) string {
-	if len(gctx.Scratch.ReverseMap) == 0 {
-		return text
+// BlockHTTPStatus returns the status to send for a block.
+func (g *GatewayContext) BlockHTTPStatus() int {
+	if g.BlockStatus == 0 {
+		return 400
 	}
-	keys := make([]string, 0, len(gctx.Scratch.ReverseMap))
-	for k := range gctx.Scratch.ReverseMap {
-		if k != "" {
-			keys = append(keys, k)
-		}
-	}
-	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
-	for _, k := range keys {
-		text = strings.ReplaceAll(text, k, gctx.Scratch.ReverseMap[k])
-	}
-	return text
+	return g.BlockStatus
 }
 
 // NewGatewayContext constructs a context for a new request with sane zero

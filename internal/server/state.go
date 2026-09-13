@@ -22,6 +22,8 @@ type AppState struct {
 	Pipeline    *pipeline.Pipeline
 	UpstreamMgr *upstream.Manager
 	Registry    provider.Registry
+	// Auth holds Cfg's precomputed credential digests (NewAuthenticator).
+	Auth *Authenticator
 }
 
 // Server holds the long-lived resources that outlive any single AppState
