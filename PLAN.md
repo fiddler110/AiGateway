@@ -19,15 +19,15 @@ existing items; append new ones at the end of their phase.
 at the end of any session that leaves work unfinished.*
 
 - **Last updated:** 2026-09-12
-- **State:** P3.5, P0.1, P0.2 committed on `main` (5b219e5). On branch
-  `m1/stream-dlp`, **all uncommitted** (about 70 changed/new files): P0.3,
-  P0.4, P0.6–P0.14, P0.16 done and ticked, each with regression tests shown
+- **State:** P3.5, P0.1, P0.2 on `main` (5b219e5). P0.3, P0.4, P0.6–P0.14,
+  P0.16 committed as 7289638 on branch `m1/stream-dlp` and pushed to
+  `origin` (not merged, no PR yet). Each item has regression tests shown
   failing on the pre-fix code. `go build`, `go vet`, `go test -count=1 ./...`
-  pass as of end of session; `-race` not run (no cgo on this machine).
-- **First thing tomorrow:** review the branch diff and commit it (the user
-  hasn't asked for a commit yet; consider splitting commits per item).
-  Run `go test -race ./...` in WSL or CI before merging, since P0.11 and the
-  half-open probe test are concurrency fixes.
+  pass; `-race` not run (no cgo on this machine).
+- **First thing next session:** get the user's answers to the open
+  questions below. Run `go test -race ./...` in WSL or CI before merging
+  (P0.11 and the half-open probe test are concurrency fixes), then open a
+  PR for `m1/stream-dlp` → `main` if the user wants one.
 - **Next up, in priority order:** P0.17 (passthrough skips redaction) and
   P0.18 (non-JSON 200 skips DLP) are fail-open DLP gaps, so do them first.
   Then P0.5 (health checks), P0.15 (startup warnings; two rows are already
@@ -37,15 +37,38 @@ at the end of any session that leaves work unfinished.*
   rejected in favour of `trusted_proxies`, unknown YAML keys are rejected,
   `auth_key: changeme` is rejected, and `api_format` anthropic/gemini are
   rejected until P1.1/P1.2. The blank template was updated to match.
-- **Open questions for the user:**
-  - P4.16: buffered-mode clients get one content chunk per choice (no
-    token-level chunks, no logprobs). Is that acceptable?
-  - P4.15 (upstream 401/403 → 502) and the 4xx message relay (P0.19) are
-    judgement calls worth a glance.
-  - `/health` detail moved to authenticated `/health/detail` until P1.6
-    `/metrics` exists. Keep it or drop it?
-  - A streaming block after the 200 has gone out can only signal its status
-    inside the SSE error event (`code`/`type`), not as an HTTP 429.
+- **Open questions for the user** (ask these at the start of the next
+  session; record each answer in the item it belongs to, then delete it
+  from this list):
+  1. **P4.16 — buffered stream shape.** Buffered-mode clients now get one
+     content chunk per choice, with no token-by-token chunks and no
+     `logprobs`. Is that acceptable, or should buffered mode replay the
+     original chunk boundaries?
+  2. **P4.15 — upstream 401/403.** These are relayed to the client as 502,
+     not 401/403, so a bad upstream API key doesn't look like a client auth
+     failure. Keep that?
+  3. **P0.19 — upstream 4xx message relay.** Up to 1024 characters of the
+     upstream's error message reach the client. Keep it (useful for
+     debugging bad requests), shorten it, or replace it with a generic
+     message?
+  4. **P0.14 — `/health/detail`.** Per-upstream circuit state moved to an
+     authenticated `/health/detail` endpoint until P1.6 `/metrics` exists.
+     Keep the endpoint or drop the detail entirely?
+  5. **P0.14 — streaming blocks after the 200.** A block that happens after
+     the stream has started can only signal its status inside the SSE error
+     event (`code`/`type`), not as an HTTP 429 with `Retry-After`. Is that
+     acceptable? (Rate-limit and budget blocks happen before the stream
+     starts, so they do get a real 429.)
+  6. **P0.14 — `trust_proxy_headers` hard rejection.** Any config that still
+     sets it, even `false` from the old blank template, now fails at startup.
+     Keep the hard error, or accept `false` silently and reject only `true`?
+  7. **P0.17 — fix direction.** Force buffered mode whenever
+     `pii_redactor`/`content_policy` is enabled (streams lose token-level
+     latency), or reject `stream_buffer: false` alongside them in
+     `Validate`?
+  8. **P0.19 — `auth_key` together with a users table.** Reject it, or keep
+     allowing a shared key alongside named users (shared-key requests then
+     get per-request pseudonym sessions)?
 - **Test note:** handler harness configs still set `retry_attempts: 0`.
   Removing it would bring back the default 2 retries with real sleeps, so
   leave it. Config loading now rejects unknown keys and `middleware_config`
