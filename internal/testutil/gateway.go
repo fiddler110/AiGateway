@@ -51,9 +51,10 @@ func NewGatewayWithRegistry(t testing.TB, yamlConfig string, registry provider.R
 	t.Cleanup(func() {
 		ts.Close() // waits for in-flight requests
 		client.CloseIdleConnections()
-		// Releases open files (audit_log) so t.TempDir cleanup can remove them.
-		if err := st.Pipeline.Close(); err != nil {
-			t.Errorf("close pipeline: %v", err)
+		// Stops health checks and releases open files (audit_log), so nothing
+		// outlives the test and t.TempDir cleanup can remove them.
+		if err := st.Close(); err != nil {
+			t.Errorf("close gateway state: %v", err)
 		}
 	})
 	return &Gateway{Server: ts, Srv: srv}

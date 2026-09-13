@@ -13,8 +13,10 @@ import (
 
 // Validate enforces the schema's referential-integrity rules: every route
 // and default upstream must point at a declared upstream, and semantic
-// caching (if enabled) must resolve to a configured upstream.
+// caching (if enabled) must resolve to a configured upstream. Non-fatal
+// problems are recorded in cfg.Warnings for the caller to log.
 func Validate(cfg *Config) error {
+	cfg.Warnings = nil
 	available := make([]string, 0, len(cfg.Upstreams))
 	for name := range cfg.Upstreams {
 		available = append(available, name)
@@ -56,7 +58,7 @@ func Validate(cfg *Config) error {
 		return err
 	}
 
-	if err := validateTrustedProxies(&cfg.Settings); err != nil {
+	if err := validateTrustedProxies(cfg); err != nil {
 		return err
 	}
 
@@ -86,7 +88,41 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	warnUnhonoured(cfg)
 	return nil
+}
+
+// warn records a non-fatal config problem. Messages name settings, never
+// values, so they are safe to log.
+func (cfg *Config) warn(msg string) {
+	cfg.Warnings = append(cfg.Warnings, msg)
+}
+
+// warnUnhonoured warns about settings that are accepted but have no effect
+// in this build (P0.15), so an operator isn't misled into thinking a
+// feature or protection is active. Remove each check when its item ships.
+func warnUnhonoured(cfg *Config) {
+	if cfg.Cache.Enabled {
+		cfg.warn("cache.enabled has no effect yet: response caching is not implemented (P2.1)")
+	}
+	if cfg.Cache.Semantic.Enabled {
+		cfg.warn("cache.semantic.enabled has no effect yet: semantic caching is not implemented (P2.4)")
+	}
+	if cfg.Redis.Enabled {
+		cfg.warn("redis.enabled has no effect yet: all gateway state is in-process (P2.3)")
+	}
+	defaults := Defaults()
+	if cfg.Settings.AuditDB != defaults.Settings.AuditDB || cfg.Settings.RetentionDays != defaults.Settings.RetentionDays {
+		cfg.warn("settings.audit_db and settings.retention_days have no effect yet (P1.5)")
+	}
+	if cfg.Resilience.HealthCheck.Enabled && len(cfg.Upstreams) > 0 {
+		for _, up := range cfg.Upstreams {
+			if up.HealthPath != "" {
+				return
+			}
+		}
+		cfg.warn("resilience.health_check.enabled is true but no upstream sets health_path, so no upstream is probed")
+	}
 }
 
 // validateResilience rejects retry and circuit settings that silently break
@@ -141,6 +177,9 @@ func validateUpstreams(cfg *Config) error {
 		default:
 			return fmt.Errorf("upstreams.%s.api_format %q is unknown (valid: openai)", name, up.APIFormat)
 		}
+		if up.HealthPath != "" && !strings.HasPrefix(up.HealthPath, "/") {
+			return fmt.Errorf("upstreams.%s.health_path %q must start with /", name, up.HealthPath)
+		}
 		if !slices.Contains(validAuthTypes, up.AuthType) {
 			return fmt.Errorf("upstreams.%s.auth_type %q is unknown (valid: bearer, x-api-key, none)", name, up.AuthType)
 		}
@@ -157,12 +196,19 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// validateTrustedProxies rejects the removed trust_proxy_headers boolean and
+// validateTrustedProxies handles the removed trust_proxy_headers boolean and
 // parses trusted_proxies into s.TrustedProxyPrefixes (P0.14). Bare IPs are
-// accepted as single-host prefixes.
-func validateTrustedProxies(s *GatewaySettings) error {
+// accepted as single-host prefixes. trust_proxy_headers: false already meant
+// "ignore X-Forwarded-For", which is what an empty trusted_proxies does, so
+// it only warns. true can't be translated without knowing the proxies' IPs,
+// and guessing a range would let clients inside it spoof their source IP.
+func validateTrustedProxies(cfg *Config) error {
+	s := &cfg.Settings
 	if s.TrustProxyHeaders != nil {
-		return fmt.Errorf("settings.trust_proxy_headers was removed; delete it and list your reverse proxies' CIDRs in settings.trusted_proxies")
+		if *s.TrustProxyHeaders {
+			return fmt.Errorf(`settings.trust_proxy_headers was removed; delete it and list your reverse proxies' IPs or CIDRs in settings.trusted_proxies (e.g. trusted_proxies: ["10.0.0.5"])`)
+		}
+		cfg.warn("settings.trust_proxy_headers was removed and false has no effect; delete it (X-Forwarded-For is ignored unless settings.trusted_proxies is set)")
 	}
 	prefixes := make([]netip.Prefix, 0, len(s.TrustedProxies))
 	for _, raw := range s.TrustedProxies {
@@ -195,6 +241,12 @@ func validateAuth(cfg *Config, available []string) error {
 	if strings.EqualFold(strings.TrimSpace(string(cfg.Settings.AuthKey)), templateAuthKey) {
 		return fmt.Errorf("settings.auth_key is still the template placeholder; set a long random value")
 	}
+	// A shared key alongside named users would let requests in that no
+	// user owns, so they couldn't be rate-limited, budgeted, audited, or
+	// given a pseudonym session per user (P0.19).
+	if cfg.Settings.AuthKey != "" && len(cfg.Users) > 0 {
+		return fmt.Errorf("settings.auth_key (or %s) cannot be combined with users; give each client its own users entry", AuthKeyEnv)
+	}
 
 	names := make([]string, 0, len(cfg.Users))
 	for name := range cfg.Users {
@@ -220,6 +272,9 @@ func validateAuth(cfg *Config, available []string) error {
 		key := string(u.GatewayKey)
 		if strings.TrimSpace(key) == "" {
 			return fmt.Errorf("users.%s.gateway_key (or gateway_key_env) must not be empty", name)
+		}
+		if strings.EqualFold(strings.TrimSpace(key), templateAuthKey) {
+			return fmt.Errorf("users.%s.gateway_key is still the template placeholder; set a long random value", name)
 		}
 		if other, dup := keyOwner[key]; dup {
 			return fmt.Errorf("users %q and %q have the same gateway_key; each user needs a unique key", other, name)

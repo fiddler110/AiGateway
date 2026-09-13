@@ -12,6 +12,8 @@ upstreams: {}
   #   api_format: openai        # openai (default); anthropic and gemini are
   #                             # rejected as not yet supported (P1.1, P1.2)
   #   models: ["gpt-4o", "gpt-4o-mini"]
+  #   health_path: "/models"    # optional; probed by resilience.health_check.
+  #                             # Appended to base_url, so it must start with /
   # anthropic:                  # not yet supported: fails validation until P1.1
   #   base_url: "https://api.anthropic.com/v1"
   #   api_key_env: "ANTHROPIC_API_KEY"
@@ -62,12 +64,16 @@ settings:
   listen_port: 8080
   listen_host: "0.0.0.0"
   # default_upstream: "openai"
+  # audit_db and retention_days aren't used yet (P1.5). Changing them from
+  # these defaults logs a startup warning.
   audit_db: "logs/gateway.db"
   request_timeout: 300.0
   retention_days: 90
   log_level: info
-  # Shared gateway key, used only when users is empty. Use a long random
-  # value; the placeholder "changeme" is rejected at load.
+  # Shared gateway key for setups without a users table. It can't be combined
+  # with users (rejected at load, also when it comes from AIGATEWAY_AUTH_KEY),
+  # so every request is attributed to a named user once users exist. Use a
+  # long random value; the placeholder "changeme" is rejected at load.
   # The AIGATEWAY_AUTH_KEY environment variable overrides this value, so the
   # key doesn't have to live in this file. If AIGATEWAY_AUTH_KEY is set but
   # empty, the config is rejected.
@@ -89,16 +95,20 @@ settings:
   # anonymous clients). The gateway walks X-Forwarded-For from the right,
   # starting at the connecting address, and stops at the first address not
   # in this list. Anything left of that is client-supplied and ignored.
-  # Empty (default) ignores X-Forwarded-For entirely. This replaces the
-  # removed trust_proxy_headers setting, which is now rejected at load.
+  # Empty (default) ignores X-Forwarded-For entirely, so behind a reverse
+  # proxy every anonymous client shares the proxy's rate-limit bucket.
+  # This replaces the removed trust_proxy_headers setting: false is ignored
+  # with a startup warning, and true is rejected at load.
   trusted_proxies: []
   # trusted_proxies: ["127.0.0.1", "10.0.0.0/8", "fd00::/8"]
 
 users: {}
-  # Per-user keys. When any user is set, this table is the only auth.
+  # Per-user keys. When any user is set, this table is the only auth, and
+  # settings.auth_key / AIGATEWAY_AUTH_KEY must be unset.
   # Each gateway_key must be non-empty and unique, upstream (optional) must
   # name a declared upstream, and usernames must stay distinct after
-  # sanitization to [A-Za-z0-9._-] (so "bob!" and "bob_" conflict).
+  # sanitization to [A-Za-z0-9._-] (so "bob!" and "bob_" conflict). The
+  # placeholder "changeme" is rejected as a gateway_key.
   # Instead of gateway_key, gateway_key_env can name an environment variable
   # holding the key. Set one or the other, not both; a named variable that is
   # unset or empty is rejected at load.
@@ -109,13 +119,15 @@ users: {}
   #   gateway_key_env: "AIGATEWAY_KEY_BOB"
 
 cache:
-  enabled: true
+  # Not implemented yet (P2.1, P2.4). Enabling either logs a startup warning.
+  enabled: false
   ttl_seconds: 300
   max_entries: 1000
   semantic:
     enabled: false
 
 redis:
+  # Not implemented yet (P2.3). Enabling it logs a startup warning.
   enabled: false
 
 resilience:
@@ -132,6 +144,12 @@ resilience:
     # Seconds an open circuit waits before a half-open probe. Must be >= 0.
     cooldown_seconds: 60
   health_check:
+    # Every interval_seconds, GETs each upstream's health_path with its normal
+    # auth header. A 5xx, timeout (timeout_seconds), or network error is a
+    # failed probe; any other status is a good one. After 3 failed probes in
+    # a row the upstream isn't used; one good probe brings it back. Upstreams
+    # without health_path aren't probed (a warning is logged if none has one).
+    # Both durations must be > 0.
     enabled: true
     interval_seconds: 30
     timeout_seconds: 5

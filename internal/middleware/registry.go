@@ -47,12 +47,19 @@ var failOpenDefaults = map[string]bool{
 	"cost_tracker":  true,
 }
 
-// SecretsScannerActive reports whether "secrets_scanner" appears in the
-// configured middleware list — the handler uses this to force hard
-// stream-buffering, since flagging a leaked credential after it has already
-// streamed to the client is unacceptable.
-func SecretsScannerActive(cfg *config.Config) bool {
-	return slices.Contains(cfg.Middleware, "secrets_scanner")
+// responseDLPMiddleware can rewrite or block model output in the response
+// phase. Passthrough streaming sends that output before they run, so they
+// could only flag a leaked credential or PII after the client already has
+// it. context_pseudonymizer isn't listed: passthrough reverses its fakes
+// chunk by chunk.
+var responseDLPMiddleware = []string{"secrets_scanner", "pii_redactor", "content_policy"}
+
+// ForcesStreamBuffer reports whether any configured middleware requires
+// buffered streaming (P0.17), whatever settings.stream_buffer says.
+func ForcesStreamBuffer(cfg *config.Config) bool {
+	return slices.ContainsFunc(cfg.Middleware, func(name string) bool {
+		return slices.Contains(responseDLPMiddleware, name)
+	})
 }
 
 var validMiddlewareName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

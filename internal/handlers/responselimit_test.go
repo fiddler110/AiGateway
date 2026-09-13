@@ -235,3 +235,29 @@ func TestChatPassthroughStreamDropMidLine(t *testing.T) {
 	res := gw.PostChat(t, chatBody(true))
 	assertStreamEndsWithError(t, res.Body, http.StatusServiceUnavailable)
 }
+
+// P0.14 (decision 2026-09-13): when stream_timeout expires before the
+// upstream sends headers, nothing has reached the client, so it gets a real
+// 504 JSON error rather than a 200 stream carrying an error event.
+func TestChatStreamTimeoutBeforeHeaders(t *testing.T) {
+	for _, mode := range streamModes {
+		t.Run(mode.name, func(t *testing.T) {
+			resp := testutil.OpenAISSE("never sent")
+			resp.HeaderDelay = time.Minute // the upstream never answers
+			fake := testutil.NewFakeUpstream(t, resp)
+			gw := limitGateway(t, fake, mode.buffered, "  stream_timeout: 0.2")
+
+			res := gw.PostChat(t, chatBody(true))
+			if res.Status != http.StatusGatewayTimeout {
+				t.Fatalf("status %d, want 504; body %.300q", res.Status, res.Body)
+			}
+			if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type %q, want application/json", ct)
+			}
+			env := decodeError(t, res.Body)
+			if env.Error.Code != http.StatusGatewayTimeout || !strings.Contains(env.Error.Message, "request_id") {
+				t.Errorf("error = %+v, want code 504 with a request_id", env.Error)
+			}
+		})
+	}
+}

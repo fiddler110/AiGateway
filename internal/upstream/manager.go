@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/scottymacleod/aigateway/internal/chatmodel"
@@ -39,6 +40,13 @@ type Manager struct {
 	// swappable so tests neither really sleep nor depend on randomness.
 	sleep     func(ctx context.Context, d time.Duration) error
 	randFloat func() float64 // uniform in [0, 1)
+
+	// The background health checker (health.go) belongs to this Manager
+	// generation and stops on Close.
+	healthMu     sync.Mutex
+	stopHealth   context.CancelFunc
+	healthClosed bool
+	healthDone   sync.WaitGroup
 }
 
 // sleepCtx waits for d or until ctx is done, whichever is first.

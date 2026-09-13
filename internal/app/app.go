@@ -26,16 +26,19 @@ func NewRegistry() provider.Registry {
 	}
 }
 
-// BuildState constructs one AppState generation from a validated config.
+// BuildState constructs one AppState generation from a validated config and
+// starts its upstream health checker. Close the state when retiring it.
 func BuildState(cfg *config.Config, client *http.Client, registry provider.Registry) (*server.AppState, error) {
 	pipe, err := middleware.Build(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("build middleware pipeline: %w", err)
 	}
+	mgr := upstream.NewManager(cfg, client, registry)
+	mgr.StartHealthChecks()
 	return &server.AppState{
 		Cfg:         cfg,
 		Pipeline:    pipe,
-		UpstreamMgr: upstream.NewManager(cfg, client, registry),
+		UpstreamMgr: mgr,
 		Registry:    registry,
 		Auth:        server.NewAuthenticator(cfg),
 	}, nil

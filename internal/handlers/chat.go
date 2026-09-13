@@ -128,6 +128,12 @@ func Chat(srv *server.Server) http.HandlerFunc {
 		}
 
 		body, err := applyResponsePipeline(r.Context(), st.Pipeline, gctx, res.Body)
+		if errors.Is(err, errUnrecognizedResponse) {
+			// The body is unscanned upstream text: log and send none of it.
+			slog.Error("upstream response is not a chat completion", "request_id", requestID, "upstream", res.ServedBy, "status", res.Status)
+			server.WriteError(w, http.StatusBadGateway, withRequestID("upstream returned an invalid response", requestID))
+			return
+		}
 		if err != nil {
 			slog.Error("response middleware failed", "request_id", requestID, "stream", false, "err", err)
 			server.WriteError(w, http.StatusInternalServerError, withRequestID("internal middleware error", requestID))
@@ -145,8 +151,9 @@ func Chat(srv *server.Server) http.HandlerFunc {
 
 // serveStream forwards a streaming chat request. Two modes:
 //
-//   - Buffer mode, forced when secrets_scanner is active (flag-after-leak
-//     is unacceptable for credentials) or settings.stream_buffer is true:
+//   - Buffer mode, forced when secrets_scanner, pii_redactor, or
+//     content_policy is active (flag-after-leak is unacceptable, P0.17) or
+//     settings.stream_buffer is true:
 //     collect the entire upstream stream, collapse it to one message per
 //     choice, run the response pipeline over every model-generated string
 //     field (content, reasoning, refusal, tool-call arguments), so it CAN
@@ -154,7 +161,7 @@ func Chat(srv *server.Server) http.HandlerFunc {
 //     client receives, then re-emit synthesized chunks or an error event.
 //     The raw upstream bytes are never forwarded, nor are upstream error
 //     events.
-//   - Passthrough mode (default): forward each line as it arrives, decoding
+//   - Passthrough mode (otherwise): forward each line as it arrives, decoding
 //     chunks to reverse pseudonymization in their string fields and holding
 //     back text that may be a fake split across chunks. At EOF run the
 //     response pipeline once for accounting/flagging only — it cannot block,
@@ -179,15 +186,16 @@ func serveStream(w http.ResponseWriter, r *http.Request, requestID string, gctx 
 	res, err := st.UpstreamMgr.SendStream(streamCtx, candidates, req, apiKeyFor)
 	if err != nil {
 		// err can carry upstream URLs, hosts, and IPs: log it, never send it.
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
+		// Nothing has been written yet, so the client gets the real status
+		// as a JSON error, like a non-streaming request, rather than a 200
+		// stream carrying an error event.
 		if errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
 			slog.Error("upstream request timed out", "request_id", requestID, "stream", true, "err", err)
-			writeSSEError(w, flusher, http.StatusGatewayTimeout, withRequestID("upstream stream timed out", requestID))
+			server.WriteError(w, http.StatusGatewayTimeout, withRequestID("upstream stream timed out", requestID))
 			return
 		}
 		slog.Error("upstream request failed", "request_id", requestID, "stream", true, "err", err)
-		writeSSEError(w, flusher, http.StatusServiceUnavailable, withRequestID("upstream unavailable", requestID))
+		server.WriteError(w, http.StatusServiceUnavailable, withRequestID("upstream unavailable", requestID))
 		return
 	}
 	gctx.Upstream = res.ServedBy
@@ -205,7 +213,7 @@ func serveStream(w http.ResponseWriter, r *http.Request, requestID string, gctx 
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	bufferMode := middleware.SecretsScannerActive(st.Cfg) || st.Cfg.Settings.StreamBuffer
+	bufferMode := middleware.ForcesStreamBuffer(st.Cfg) || st.Cfg.Settings.StreamBuffer
 	if bufferMode {
 		serveBufferedStream(w, flusher, r.Context(), streamCtx, requestID, st.Pipeline, gctx, body)
 	} else {

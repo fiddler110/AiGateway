@@ -254,16 +254,64 @@ func TestChatBufferedStreamAppliesResponseRedaction(t *testing.T) {
 }
 
 // Passthrough without pseudonyms to reverse forwards upstream bytes as-is.
+// token_counter only measures the response, so it doesn't force buffering.
 func TestChatPassthroughStreamUnchangedWithoutPseudonyms(t *testing.T) {
 	upstream := testutil.OpenAISSE("hel", "lo")
 	var want strings.Builder
 	for _, c := range upstream.Chunks {
 		want.WriteString(c.Data)
 	}
-	gw := streamGateway(t, testutil.NewFakeUpstream(t, upstream), false, "pii_redactor")
+	gw := streamGateway(t, testutil.NewFakeUpstream(t, upstream), false, "token_counter")
 
 	res := gw.PostChat(t, chatBody(true))
 	if res.Body != want.String() {
 		t.Errorf("body %q, want upstream bytes %q", res.Body, want.String())
 	}
+}
+
+// P0.17: pii_redactor and content_policy force buffered mode even with
+// stream_buffer: false, so model output is redacted or blocked before any of
+// it reaches the client.
+func TestChatResponseDLPForcesBufferedStream(t *testing.T) {
+	t.Run("pii_redactor", func(t *testing.T) {
+		fake := testutil.NewFakeUpstream(t, testutil.OpenAISSE("mail bob@exa", "mple.com please"))
+		gw := streamGateway(t, fake, false, "pii_redactor")
+		res := gw.PostChat(t, chatBody(true))
+		if res.Status != http.StatusOK {
+			t.Fatalf("status %d, body %q", res.Status, res.Body)
+		}
+		if strings.Contains(res.Body, "bob@") || strings.Contains(res.Body, "mple.com") {
+			t.Fatalf("unredacted email reached the client: %q", res.Body)
+		}
+		if cs := readStream(t, res.Body); cs.content != "mail [EMAIL] please" {
+			t.Errorf("content %q", cs.content)
+		}
+	})
+	t.Run("content_policy", func(t *testing.T) {
+		fake := testutil.NewFakeUpstream(t, testutil.OpenAISSE("this is forbid", "den text"))
+		gw := testutil.NewGateway(t, fmt.Sprintf(`
+upstreams:
+  fake:
+    base_url: %q
+    auth_type: none
+settings:
+  default_upstream: fake
+  stream_buffer: false
+resilience:
+  retry_attempts: 0
+  health_check:
+    enabled: false
+middleware: [content_policy]
+middleware_config:
+  content_policy:
+    deny_patterns: ['forbidden']
+`, fake.URL))
+		res := gw.PostChat(t, chatBody(true))
+		if strings.Contains(res.Body, "forbid") || strings.Contains(res.Body, "den text") {
+			t.Errorf("model output reached the client before content_policy ran: %q", res.Body)
+		}
+		if !strings.Contains(res.Body, `"content_policy:`) {
+			t.Errorf("no content_policy block event in %q", res.Body)
+		}
+	})
 }

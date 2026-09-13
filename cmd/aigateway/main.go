@@ -43,6 +43,9 @@ func main() {
 	}
 
 	server.SetupLogging(cfg.Settings.LogLevel)
+	for _, w := range cfg.Warnings {
+		slog.Warn("config: " + w)
+	}
 
 	client := httpclient.New()
 	registry := app.NewRegistry()
@@ -75,5 +78,8 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown failed", "err", err)
+	}
+	if err := srv.CurrentState().Close(); err != nil {
+		slog.Error("close gateway state", "err", err)
 	}
 }

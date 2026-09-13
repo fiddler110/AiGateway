@@ -74,10 +74,10 @@ middleware_config:
 		post("m", false),    // served by the fallback upstream
 		post("m", true),     // streamed by the fallback upstream
 		post("dead", false), // no upstream answers: 503
-		post("dead", true),  // stream commits to 200, then an error event: 503
+		post("dead", true),  // stream fails before any byte: a real 503 too
 		post("m", false),    // fifth request in the minute: rate limited
 	}
-	wantHTTP := []int{200, 200, 503, 200, 429}
+	wantHTTP := []int{200, 200, 503, 503, 429}
 	for i, res := range results {
 		if res.Status != wantHTTP[i] {
 			t.Fatalf("request %d: status %d, want %d; body %q", i, res.Status, wantHTTP[i], res.Body)

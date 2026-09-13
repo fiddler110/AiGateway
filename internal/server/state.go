@@ -26,6 +26,16 @@ type AppState struct {
 	Auth *Authenticator
 }
 
+// Close retires this generation: it stops the upstream health checker and
+// releases middleware resources (audit_log's open file). Call it after the
+// generation's in-flight requests have finished.
+func (s *AppState) Close() error {
+	if s.UpstreamMgr != nil {
+		s.UpstreamMgr.Close()
+	}
+	return s.Pipeline.Close()
+}
+
 // Server holds the long-lived resources that outlive any single AppState
 // generation (HTTP client, current-state pointer) plus everything needed to
 // build a new generation on reload.

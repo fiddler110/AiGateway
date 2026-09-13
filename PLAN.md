@@ -18,64 +18,52 @@ existing items; append new ones at the end of their phase.
 *Handoff note for the next session. Overwrite this section (don't append to it)
 at the end of any session that leaves work unfinished.*
 
-- **Last updated:** 2026-09-12
-- **State:** P3.5, P0.1, P0.2 on `main` (5b219e5). P0.3, P0.4, P0.6–P0.14,
-  P0.16 committed as 7289638 on branch `m1/stream-dlp` and pushed to
-  `origin` (not merged, no PR yet). Each item has regression tests shown
-  failing on the pre-fix code. `go build`, `go vet`, `go test -count=1 ./...`
-  pass; `-race` not run (no cgo on this machine).
-- **First thing next session:** get the user's answers to the open
-  questions below. Run `go test -race ./...` in WSL or CI before merging
-  (P0.11 and the half-open probe test are concurrency fixes), then open a
-  PR for `m1/stream-dlp` → `main` if the user wants one.
-- **Next up, in priority order:** P0.17 (passthrough skips redaction) and
-  P0.18 (non-JSON 200 skips DLP) are fail-open DLP gaps, so do them first.
-  Then P0.5 (health checks), P0.15 (startup warnings; two rows are already
-  resolved), then the P0.19 follow-up batch. Then M1's remaining P3.1.
-- **In progress:** none. The P0.5 agent was not started.
-- **Breaking config changes on this branch:** `trust_proxy_headers` is
-  rejected in favour of `trusted_proxies`, unknown YAML keys are rejected,
-  `auth_key: changeme` is rejected, and `api_format` anthropic/gemini are
-  rejected until P1.1/P1.2. The blank template was updated to match.
-- **Open questions for the user** (ask these at the start of the next
-  session; record each answer in the item it belongs to, then delete it
-  from this list):
-  1. **P4.16 — buffered stream shape.** Buffered-mode clients now get one
-     content chunk per choice, with no token-by-token chunks and no
-     `logprobs`. Is that acceptable, or should buffered mode replay the
-     original chunk boundaries?
-  2. **P4.15 — upstream 401/403.** These are relayed to the client as 502,
-     not 401/403, so a bad upstream API key doesn't look like a client auth
-     failure. Keep that?
-  3. **P0.19 — upstream 4xx message relay.** Up to 1024 characters of the
-     upstream's error message reach the client. Keep it (useful for
-     debugging bad requests), shorten it, or replace it with a generic
-     message?
-  4. **P0.14 — `/health/detail`.** Per-upstream circuit state moved to an
-     authenticated `/health/detail` endpoint until P1.6 `/metrics` exists.
-     Keep the endpoint or drop the detail entirely?
-  5. **P0.14 — streaming blocks after the 200.** A block that happens after
-     the stream has started can only signal its status inside the SSE error
-     event (`code`/`type`), not as an HTTP 429 with `Retry-After`. Is that
-     acceptable? (Rate-limit and budget blocks happen before the stream
-     starts, so they do get a real 429.)
-  6. **P0.14 — `trust_proxy_headers` hard rejection.** Any config that still
-     sets it, even `false` from the old blank template, now fails at startup.
-     Keep the hard error, or accept `false` silently and reject only `true`?
-  7. **P0.17 — fix direction.** Force buffered mode whenever
-     `pii_redactor`/`content_policy` is enabled (streams lose token-level
-     latency), or reject `stream_buffer: false` alongside them in
-     `Validate`?
-  8. **P0.19 — `auth_key` together with a users table.** Reject it, or keep
-     allowing a shared key alongside named users (shared-key requests then
-     get per-request pseudonym sessions)?
+- **Last updated:** 2026-09-13
+- **State:** all of Phase 0b except the open P0.19 follow-ups is on `main`.
+  On 2026-09-13, at the user's request, `m1/stream-dlp` (P0.3–P0.18,
+  including this session's P0.5, P0.15, P0.17, P0.18, P0.19 bullets and
+  P0.14 decisions) was fast-forwarded into `main` and both were pushed,
+  without a PR. Each item has regression tests; the handler and config ones
+  were shown failing against the pre-change commit in a scratch worktree
+  (the health tests can't compile there). `go build`, `go vet`,
+  `go test -count=1 ./...` pass. **`-race` has never run on this code** (no
+  cgo on this machine, and WSL has gcc but no Go).
+- **First thing next session:** run `go test -race ./...` in CI, or in WSL
+  after installing Go there. P0.11, the half-open probe test, and the new
+  health checker are concurrency code that is now on `main` unraced.
+- **Next up:** the rest of the P0.19 batch (`middleware_config.<name>`
+  unknown keys, `cooldown_seconds: 0` and uncapped retries, decoder error
+  text, tool-call `name`/`id` scanning, buffered error-event accounting,
+  pre-pipeline audit, health checks on a merged `Manager`, a warning when
+  response DLP overrides `stream_buffer: false`). Then M1's remaining P3.1.
+- **In progress:** none.
+- **Breaking changes on this branch:** unknown YAML keys are rejected.
+  `trust_proxy_headers: true` is rejected in favour of `trusted_proxies`;
+  `false` only warns. `auth_key: changeme` and a user `gateway_key: changeme`
+  are rejected. `auth_key` (or `AIGATEWAY_AUTH_KEY`) together with `users`
+  is rejected. `health_path` must start with `/`. `api_format`
+  anthropic/gemini are rejected until P1.1/P1.2. `cache.enabled` now
+  defaults to `false`. The blank template matches. Clients: streams with
+  `secrets_scanner`, `pii_redactor`, or `content_policy` enabled are always
+  buffered, and a stream that fails before any byte gets a 503/504 JSON
+  error instead of a 200 with an error event.
+- **Open questions for the user:** none. All were answered on 2026-09-13
+  and recorded in their items: P0.17 (force buffered), P0.19 (reject
+  `auth_key` with `users`; keep the 1024-char upstream 4xx relay), P0.14
+  (warn on `trust_proxy_headers: false`; keep `/health/detail`; keep SSE
+  error events for blocks after a stream's 200), P4.15 (keep the 502 with
+  an explicit message), P4.16 (keep one chunk per choice).
 - **Test note:** handler harness configs still set `retry_attempts: 0`.
   Removing it would bring back the default 2 retries with real sleeps, so
-  leave it. Config loading now rejects unknown keys and `middleware_config`
-  entries for unlisted middleware, so new test YAML must be exact.
-  `gofmt -l .` lists CRLF-only files on this Windows checkout
-  (`core.autocrlf=true`); run it on changed files instead.
-
+  leave it. Config loading rejects unknown keys and `middleware_config`
+  entries for unlisted middleware, so new test YAML must be exact. A test
+  config that enables health checks and sets `health_path` starts a real
+  background checker; `testutil.NewGateway` closes it on cleanup through
+  `AppState.Close`. `gofmt -l .` lists CRLF-only files on this Windows
+  checkout (`core.autocrlf=true`); run it on changed files with CRs
+  stripped instead. Code edits with multi-line shell heredocs containing
+  apostrophes failed to parse in this harness; edit specs applied by a
+  script file worked.
 ---
 
 ## How to use this plan
@@ -282,7 +270,22 @@ Each should land with a regression test.
   passthrough mode, keep a per-choice tail buffer of up to
   `maxFakeLen-1` characters that is withheld until the next chunk proves it
   isn't the prefix of a fake. Add tests for both cases.
-- [ ] **P0.5 — Background health checks don't exist.** Implement
+- [x] **P0.5 — Background health checks don't exist.** *Done 2026-09-13
+  (branch m1/stream-dlp): `internal/upstream/health.go`. `app.BuildState`
+  starts one checker per `Manager`, and `AppState.Close` (called by the test
+  harness and on shutdown; P1.3 must call it on the retired state) cancels
+  it and waits for in-flight probes. Each tick probes upstreams
+  concurrently: GET `base_url + health_path` with the upstream's auth
+  header. Below 500 is healthy, as in the reference. A 5xx, timeout, or
+  network error is a failure, and `RecordCheck`'s 3-in-a-row rule applies.
+  Deviation: upstreams without `health_path` aren't probed (the reference
+  guesses `/health`, `/v1/models`, then the base URL, where a 404 would
+  count as healthy anyway). Config warns when checks are on but no upstream
+  has a `health_path`, and `Validate` requires it to start with `/`.
+  Verified by: `TestHealthChecksMarkUnhealthyAndRecover`,
+  `TestHealthCheckVerdicts`, `TestHealthChecksSkipped`,
+  `TestHealthChecksStopOnClose` (upstream), `TestValidateHealthPath`.*
+  Implement
   `internal/upstream/health.go`: one goroutine per `Manager` generation,
   ticking at `health_check.interval_seconds`, probing each upstream's
   `health_path` (skip upstreams without one) with `timeout_seconds`, calling
@@ -440,6 +443,14 @@ Each should land with a regression test.
 - [x] **P0.14 — Smaller correctness items (batch into one change).** *Branch m1/stream-dlp.*
   *All bullets done 2026-09-12; verified by the tests named in each note.
   `-race` not run (no cgo on this machine).*
+  *Decisions 2026-09-13 (user): keep the authenticated `/health/detail`
+  until P1.6 `/metrics` replaces it. A response-phase block after a
+  stream's 200 stays an SSE error event (headers go out early so keepalives
+  can be added later). Streams that fail before any byte is sent (every
+  upstream unavailable, or `stream_timeout` before upstream headers) now get
+  a real 503/504 JSON error, like non-streaming requests. Verified by:
+  `TestChatUpstreamFailureIsGenericAndValidJSON`,
+  `TestChatStreamTimeoutBeforeHeaders`.*
   - `SourceIP` splits `RemoteAddr` on the last `:` (`auth.go:100`), which
     leaves brackets on IPv6 (`[::1]`); use `net.SplitHostPort`. With
     `trust_proxy_headers`, taking the **leftmost** `X-Forwarded-For` entry
@@ -447,8 +458,12 @@ Each should land with a regression test.
     replace the boolean with `trusted_proxies: [CIDR...]` and walk XFF
     right-to-left, stopping at the first untrusted hop.
     *Done 2026-09-12: `trusted_proxies` (CIDRs or bare IPs, parsed in
-    `Validate`); any `trust_proxy_headers` key, even `false`, is rejected
-    with a pointer to `trusted_proxies`. An unparseable XFF entry stops at
+    `Validate`); `trust_proxy_headers: true` is rejected with a pointer to
+    `trusted_proxies`. *Changed 2026-09-13 (user decision): `false` now
+    loads with a startup warning instead of failing. It already meant
+    "ignore X-Forwarded-For" and the old template shipped it, while `true`
+    can't be translated without knowing the proxies' IPs. Verified by:
+    `TestValidateTrustedProxies`, `TestConfigWarnings`.* An unparseable XFF entry stops at
     the trusted proxy. Verified by: `TestSourceIP` (server),
     `TestValidateTrustedProxies` (config).*
   - `http.Server` has no `ReadHeaderTimeout`, `ReadTimeout`, or `IdleTimeout`
@@ -547,7 +562,15 @@ Each should land with a regression test.
     `gateway_key` and `gateway_key_env` on one user, or an unset/empty named
     variable are errors. Verified by: `TestAuthKeyEnvOverride`,
     `TestGatewayKeyEnv`.*
-- [ ] **P0.15 — Config fields accepted but not honoured.** Until the owning
+- [x] **P0.15 — Config fields accepted but not honoured.** *Done
+  2026-09-13: `Validate` fills `Config.Warnings` (`warnUnhonoured`) and
+  `main` logs them at startup. Covered: `cache.enabled`,
+  `cache.semantic.enabled`, `redis.enabled`, and `audit_db` /
+  `retention_days` when changed from their defaults. `health_check` is
+  honoured since P0.5; its warning is now "no upstream has health_path".
+  `cache.enabled` now defaults to `false` (template too), so an untouched
+  config logs nothing. Verified by: `TestConfigWarnings`,
+  `TestBlankTemplateLoads` (asserts no warnings).* Until the owning
   item ships, each of these should produce a startup warning (not silent
   acceptance), so an operator isn't misled into thinking a protection is
   active:
@@ -558,7 +581,7 @@ Each should land with a regression test.
   | `cache.semantic.*` | off | P2.4 |
   | `redis.*` | off | P2.3 |
   | `settings.audit_db`, `settings.retention_days` | set | P1.5 |
-  | `resilience.health_check.*` | enabled | P0.5 |
+  | ~~`resilience.health_check.*`~~ | enabled | P0.5 — *honoured since P0.5* |
   | ~~`resilience.retry_delay_seconds`~~ | 1.0 | P0.6 — *honoured since P0.6* |
   | ~~`upstreams.*.api_format: anthropic\|gemini`~~ | — | P1.1, P1.2 — *rejected by `Validate` since P0.13* |
 
@@ -590,7 +613,15 @@ Each should land with a regression test.
   reversal path between the non-streaming and streaming handlers, and decide
   how accounting middleware treats the extra passes
   (`CostFinalized`/`TokensFinalized`).
-- [ ] **P0.17 — Passthrough streams skip response redaction.** Found during
+- [x] **P0.17 — Passthrough streams skip response redaction.** *Done
+  2026-09-13 (user chose forcing buffered mode over rejecting the config):
+  `middleware.ForcesStreamBuffer` forces buffered streaming whenever
+  `secrets_scanner`, `pii_redactor`, or `content_policy` is enabled,
+  whatever `stream_buffer` says. `context_pseudonymizer` and accounting
+  middleware still allow passthrough. The passthrough-bytes test now uses
+  `token_counter`, and the CLAUDE.md invariant was updated. Verified by:
+  `TestChatResponseDLPForcesBufferedStream` (fails against the pre-change
+  code).* Found during
   P0.16. Buffered mode is forced only when `secrets_scanner` is enabled. With
   `pii_redactor` or `content_policy` enabled on their own, passthrough mode
   sends unredacted model text to the client, and the response middleware can
@@ -598,21 +629,36 @@ Each should land with a regression test.
   **Fix:** force buffered mode whenever any response-rewriting or blocking
   middleware is enabled, or reject `stream_buffer: false` with them in
   `Validate`. Update the CLAUDE.md invariant and that test to match.
-- [ ] **P0.18 — Non-JSON 200 bodies skip response DLP.** Found during P0.16.
+- [x] **P0.18 — Non-JSON 200 bodies skip response DLP.** *Done 2026-09-13:
+  `decodeCompletion` accepts only one JSON object whose `choices` is an
+  array of objects that each have a `message` object. Anything else, with
+  any middleware configured, is logged (upstream and status, no body) and
+  answered with a generic 502 "upstream returned an invalid response". With
+  no middleware the body is still forwarded as-is, like the reference.
+  Verified by: `TestChatNonStreamUnrecognizedBodyFailsClosed` (fails against
+  the pre-change code).* Found during P0.16.
   A non-streaming 200 whose body doesn't decode as a chat completion bypasses
   the response pipeline and reaches the client. DLP must fail closed: return a
   generic 502 (P0.8 path) instead of forwarding it.
 - [ ] **P0.19 — Follow-ups found while doing P0.6–P0.16 (batch).**
-  - A user's `gateway_key` of `changeme` is accepted; only `auth_key` is
-    checked (P0.12).
-  - `auth_key` set together with a users table isn't rejected, and
-    `AIGATEWAY_AUTH_KEY` makes that easier to hit by accident (P0.14).
+  - ~~A user's `gateway_key` of `changeme` is accepted; only `auth_key` is
+    checked (P0.12).~~ *Done 2026-09-13. Verified by:
+    `TestValidateAuthTable`.*
+  - ~~`auth_key` set together with a users table isn't rejected, and
+    `AIGATEWAY_AUTH_KEY` makes that easier to hit by accident (P0.14).~~
+    *Done 2026-09-13 (user decision: once users exist, every request must
+    belong to a named user): `Validate` rejects the combination, including
+    through the env var. Verified by: `TestValidateAuthTable`,
+    `TestAuthKeyEnvWithUsersRejected`.*
   - Keys inside `middleware_config.<name>` aren't checked for unknown fields,
     so a typo in a middleware's own settings is silent (P0.14).
   - `cooldown_seconds: 0` passes validation and effectively disables the
     circuit breaker. Retry counts and delays have no upper cap (P0.6).
   - Upstream 4xx relay (P0.2/P4.15) passes up to 1024 chars of the
     upstream's message text to the client, which could carry internal detail.
+    *Decision 2026-09-13 (user): keep it as is, preferring clarity over
+    obfuscation for now. Revisit if upstream messages turn out to leak
+    something.*
   - Invalid request JSON returns the decoder's `err.Error()` to the client.
     It only describes the client's own input, so low risk.
   - Tool-call `name` and `id` aren't scanned by response DLP (P0.16).
@@ -622,7 +668,12 @@ Each should land with a regression test.
     aren't audited (P0.14 audit split).
   - Passthrough mode drops text held back as a possible partial pseudonym
     when the stream ends in an error. That fails safe; note only.
-  - For later items: hot reload (P1.3) must call `Pipeline.Close` on the old
+  - A `Manager` from `WithMergedConfig` (P1.3) doesn't start health checks
+    by itself; call `StartHealthChecks` on it. Found during P0.5.
+  - `stream_buffer: false` is silently overridden when response DLP
+    middleware is enabled (P0.17). Consider a startup warning.
+  - For later items: hot reload (P1.3) must call `AppState.Close` (it now
+    also stops the health checker) on the old
     state (audit file handle) and currently loses all pseudonymizer sessions.
     P1.1 stream translators must emit an OpenAI-style usage chunk, because
     the usage from `StreamTranslator.Done()` is discarded, or `StreamResult`
@@ -1153,8 +1204,11 @@ modifies.
   reflected. Upstream 401/403/407 means the *gateway's* `api_key_env`
   credential was rejected, not the client's. Relaying 401 would make clients
   think their gateway key is wrong, and OpenAI's 401 message quotes a
-  fragment of the rejected key. The client gets a generic 502 and the server
-  log gets the upstream name and status. Upstream messages echoing
+  fragment of the rejected key. The client gets a 502 with the message
+  "upstream rejected the gateway's credentials" (no upstream text), and the
+  server log gets the upstream name and status. *Decision 2026-09-13 (user):
+  keep the 502 and that explicit message. Verified by the "401 is the
+  gateway's credential" case in `chat_test.go`.* Upstream messages echoing
   pseudonymized request text are not reverse-substituted (the client sees
   fake values); revisit with P0.4.
 - [x] **P4.16 — Buffered streams are re-synthesized, not string-substituted
@@ -1170,6 +1224,9 @@ modifies.
   dropped, because buffered mode exists so nothing unscanned reaches the
   client. Passthrough also decodes chunks rather than substituting bytes, but
   only when the request has pseudonyms to reverse.
+  *Decision 2026-09-13 (user): keep one content chunk per choice. Replaying
+  the original chunk boundaries would still arrive after the same wait, so
+  it would only be cosmetic.*
 
 ---
 

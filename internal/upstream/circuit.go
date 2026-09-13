@@ -113,18 +113,21 @@ func (h *HealthState) IsHealthy() bool {
 }
 
 // RecordCheck applies the "unhealthy only after 3 consecutive failed
-// cycles, healthy immediately on first success" rule.
-func (h *HealthState) RecordCheck(ok bool, now time.Time) {
+// cycles, healthy immediately on first success" rule, and reports whether
+// it changed the upstream's health.
+func (h *HealthState) RecordCheck(ok bool, now time.Time) (changed bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	was := h.healthy
 	h.lastCheck = now
 	if ok {
 		h.healthy = true
 		h.consecutiveFailures = 0
-		return
+	} else {
+		h.consecutiveFailures++
+		if h.consecutiveFailures >= 3 {
+			h.healthy = false
+		}
 	}
-	h.consecutiveFailures++
-	if h.consecutiveFailures >= 3 {
-		h.healthy = false
-	}
+	return h.healthy != was
 }

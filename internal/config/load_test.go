@@ -53,8 +53,9 @@ func TestValidateMiddlewareConfigNeedsListedMiddleware(t *testing.T) {
 	}
 }
 
-// P0.14: trust_proxy_headers is rejected with a pointer to trusted_proxies,
-// and trusted_proxies entries must parse.
+// P0.14: trust_proxy_headers: true is rejected with a pointer to
+// trusted_proxies, false loads (with a warning, see TestConfigWarnings), and
+// trusted_proxies entries must parse.
 func TestValidateTrustedProxies(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -65,7 +66,7 @@ func TestValidateTrustedProxies(t *testing.T) {
 		{"none", "{}", "", 0},
 		{"cidrs and ips", "settings:\n  trusted_proxies: [\"10.0.0.0/8\", \"192.168.1.10\", \"fd00::/8\", \"::1\"]\n", "", 4},
 		{"legacy true", "settings:\n  trust_proxy_headers: true\n", "trusted_proxies", 0},
-		{"legacy false", "settings:\n  trust_proxy_headers: false\n", "trusted_proxies", 0},
+		{"legacy false", "settings:\n  trust_proxy_headers: false\n", "", 0},
 		{"bad prefix length", "settings:\n  trusted_proxies: [\"10.0.0.0/33\"]\n", "trusted_proxies", 0},
 		{"not an ip", "settings:\n  trusted_proxies: [\"proxy.local\"]\n", "trusted_proxies", 0},
 		{"empty entry", "settings:\n  trusted_proxies: [\"\"]\n", "trusted_proxies", 0},

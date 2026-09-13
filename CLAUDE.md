@@ -64,7 +64,11 @@ go run ./cmd/aigateway -config config.yaml
 - **Constant-time auth compare across all users with no early exit.** Don't replace it
   with a map lookup.
 - **`x-client-id` is advisory.** Never key a security decision on it (see P0.10).
-- **Streaming is forced into buffered mode whenever `secrets_scanner` is enabled.**
+- **Streaming is forced into buffered mode whenever `secrets_scanner`, `pii_redactor`, or
+  `content_policy` is enabled** (`middleware.ForcesStreamBuffer`, P0.17). Passthrough
+  streams reach the client before response DLP runs.
+- **A 2xx body that isn't a chat completion fails closed (502) when any middleware is
+  configured** (P0.18). Never forward model output the response pipeline couldn't scan.
 - **Keep the dependency surface small and cgo-free** (P4.2, P4.10). Ask before adding a
   module, and record the decision in P4.10.
 - Only use stdlib `regexp` (RE2). Never add a backtracking regex engine.
@@ -89,7 +93,6 @@ go run ./cmd/aigateway -config config.yaml
 ## Known traps (as of 2026-09-12; remove each as it's fixed)
 
 - Several config fields are accepted but do nothing yet: `cache`, `redis`, `audit_db`,
-  `health_check` (P0.15). Don't assume a config key means the feature exists.
-- Streaming is only forced into buffered mode for `secrets_scanner`, so with just
-  `pii_redactor`/`content_policy` enabled, passthrough streams go out unredacted (P0.17).
+  `retention_days` (P0.15). They log a startup warning (`config.warnUnhonoured`), but
+  don't assume a config key means the feature exists.
 - `web/` is an empty placeholder for the P1.7 dashboard.

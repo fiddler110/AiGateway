@@ -106,7 +106,7 @@ func TestChatRelaysUpstreamClientErrors(t *testing.T) {
 			notInBody:  "proxy says no",
 		},
 		{
-			name:       "401 is the gateway's credential, becomes generic 502",
+			name:       "401 is the gateway's credential, becomes 502",
 			upstream:   testutil.OpenAIError(http.StatusUnauthorized, "Incorrect API key provided: sk-abc***xyz", "invalid_request_error"),
 			wantStatus: http.StatusBadGateway,
 			wantMsg:    "upstream rejected the gateway's credentials",
@@ -174,33 +174,21 @@ func TestChatUpstreamFailureIsGenericAndValidJSON(t *testing.T) {
 				}
 			}
 
-			var payloads []string
-			if tc.stream {
-				if res.Status != http.StatusOK {
-					t.Fatalf("status %d, body %q", res.Status, res.Body)
-				}
-				for _, line := range strings.Split(res.Body, "\n") {
-					if p, ok := strings.CutPrefix(line, "data: "); ok && p != "[DONE]" {
-						payloads = append(payloads, p)
-					}
-				}
-				if len(payloads) != 1 {
-					t.Fatalf("want one error event, got %d; body %q", len(payloads), res.Body)
-				}
-			} else {
-				if res.Status != http.StatusServiceUnavailable {
-					t.Fatalf("status %d, body %q", res.Status, res.Body)
-				}
-				payloads = []string{res.Body}
+			// Nothing reached the client before the failure, so streams get
+			// the real 503 as a JSON error too, not a 200 stream carrying an
+			// error event (P0.14 decision, 2026-09-13).
+			if res.Status != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, body %q", res.Status, res.Body)
 			}
-			for _, p := range payloads {
-				env := decodeError(t, p)
-				if env.Error.Code != http.StatusServiceUnavailable || env.Error.Type != "api_error" {
-					t.Errorf("error = %+v, want code 503 type api_error", env.Error)
-				}
-				if reqID != "" && !strings.Contains(env.Error.Message, reqID) {
-					t.Errorf("message %q lacks request ID %q", env.Error.Message, reqID)
-				}
+			if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type %q, want application/json", ct)
+			}
+			env := decodeError(t, res.Body)
+			if env.Error.Code != http.StatusServiceUnavailable || env.Error.Type != "api_error" {
+				t.Errorf("error = %+v, want code 503 type api_error", env.Error)
+			}
+			if reqID != "" && !strings.Contains(env.Error.Message, reqID) {
+				t.Errorf("message %q lacks request ID %q", env.Error.Message, reqID)
 			}
 		})
 	}
@@ -219,4 +207,38 @@ func TestChatStreamingSuccessStillStreams(t *testing.T) {
 	if !strings.Contains(res.Body, `"hel"`) || !strings.HasSuffix(res.Body, "data: [DONE]\n\n") {
 		t.Errorf("unexpected stream body %q", res.Body)
 	}
+}
+
+// P0.18: a 200 whose body isn't a chat completion can't be scanned, so with
+// middleware configured it becomes a generic 502 and none of the body
+// reaches the client. With no middleware it is still forwarded.
+func TestChatNonStreamUnrecognizedBodyFailsClosed(t *testing.T) {
+	bodies := []struct{ name, body string }{
+		{"not JSON", "leaked bob@example.com in plain text"},
+		{"no choices", `{"object":"chat.completion","output":"leaked bob@example.com"}`},
+		{"choice without message", `{"choices":[{"index":0,"text":"leaked bob@example.com"}]}`},
+		{"trailing data", `{"choices":[]} leaked bob@example.com`},
+	}
+	for _, b := range bodies {
+		t.Run(b.name, func(t *testing.T) {
+			gw := streamGateway(t, testutil.NewFakeUpstream(t, testutil.Response{Body: b.body}), false, "pii_redactor")
+			res := gw.PostChat(t, chatBody(false))
+			if res.Status != http.StatusBadGateway {
+				t.Fatalf("status %d, want 502; body %q", res.Status, res.Body)
+			}
+			if strings.Contains(res.Body, "leaked") || strings.Contains(res.Body, "bob@") {
+				t.Errorf("unscanned upstream body reached the client: %q", res.Body)
+			}
+			if env := decodeError(t, res.Body); !strings.Contains(env.Error.Message, "invalid response") {
+				t.Errorf("error message %q", env.Error.Message)
+			}
+		})
+	}
+	t.Run("no middleware", func(t *testing.T) {
+		const body = "plain text from a non-standard upstream"
+		gw := gatewayFor(t, testutil.NewFakeUpstream(t, testutil.Response{Body: body}))
+		if res := gw.PostChat(t, chatBody(false)); res.Status != http.StatusOK || res.Body != body {
+			t.Errorf("status %d body %q, want 200 with the upstream body", res.Status, res.Body)
+		}
+	})
 }

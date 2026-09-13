@@ -28,6 +28,8 @@ func TestValidateAuthTable(t *testing.T) {
 		{"truncated username collision", "users:\n  " + strings.Repeat("a", 64) + "x:\n    gateway_key: \"k1\"\n  " + strings.Repeat("a", 64) + "y:\n    gateway_key: \"k2\"\n", true},
 		{"empty username", "users:\n  \"\":\n    gateway_key: \"k1\"\n", true},
 		{"duplicate username", "users:\n  bob:\n    gateway_key: \"k1\"\n  bob:\n    gateway_key: \"k2\"\n", true},
+		{"auth_key with users", "settings:\n  auth_key: \"a-real-key\"\nusers:\n  alice:\n    gateway_key: \"k-alice\"\n", true},
+		{"user gateway_key changeme", "users:\n  alice:\n    gateway_key: \" ChangeMe \"\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,8 +46,12 @@ func TestValidateAuthTable(t *testing.T) {
 
 // The shipped template must still load after P0.12's stricter validation.
 func TestBlankTemplateLoads(t *testing.T) {
-	if _, err := Load("../../config/aigateway.blank.yaml"); err != nil {
+	cfg, err := Load("../../config/aigateway.blank.yaml")
+	if err != nil {
 		t.Fatalf("blank template: %v", err)
+	}
+	if len(cfg.Warnings) > 0 {
+		t.Errorf("blank template loads with warnings %q; its values should all be honoured", cfg.Warnings)
 	}
 }
 
@@ -130,5 +136,74 @@ func TestValidatePersistSessionsForUnauthenticated(t *testing.T) {
 				t.Errorf("Parse error = %v, wantErr %t", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func hasWarning(cfg *Config, substr string) bool {
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// P0.15: settings that are accepted but have no effect load with a warning
+// naming the setting. A config that uses none of them has no warnings.
+func TestConfigWarnings(t *testing.T) {
+	const unprobed = "upstreams:\n  local:\n    base_url: \"http://127.0.0.1:1\"\n"
+	const probed = unprobed + "    health_path: /health\n"
+	cases := []struct {
+		name string
+		yaml string
+		want string // substring of one warning; empty means no warnings
+	}{
+		{"defaults", "{}", ""},
+		{"probed upstream", probed, ""},
+		{"health checks disabled", unprobed + "resilience:\n  health_check:\n    enabled: false\n", ""},
+		{"no upstream has health_path", unprobed, "health_path"},
+		{"cache", "cache:\n  enabled: true\n", "cache.enabled"},
+		{"semantic cache", probed + "settings:\n  default_upstream: local\ncache:\n  semantic:\n    enabled: true\n", "cache.semantic.enabled"},
+		{"redis", "redis:\n  enabled: true\n", "redis.enabled"},
+		{"audit_db", "settings:\n  audit_db: other.db\n", "settings.audit_db"},
+		{"retention_days", "settings:\n  retention_days: 7\n", "settings.retention_days"},
+		{"trust_proxy_headers false", "settings:\n  trust_proxy_headers: false\n", "trust_proxy_headers"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if tc.want == "" && len(cfg.Warnings) > 0 {
+				t.Errorf("warnings %q, want none", cfg.Warnings)
+			}
+			if tc.want != "" && !hasWarning(cfg, tc.want) {
+				t.Errorf("warnings %q, want one mentioning %q", cfg.Warnings, tc.want)
+			}
+		})
+	}
+}
+
+// P0.19: a shared key can't sit alongside named users, including one that
+// arrives through AIGATEWAY_AUTH_KEY, and the error names no key.
+func TestAuthKeyEnvWithUsersRejected(t *testing.T) {
+	t.Setenv(AuthKeyEnv, "env-shared-key")
+	_, err := Parse([]byte("users:\n  alice:\n    gateway_key: \"k-alice\"\n"))
+	if err == nil || !strings.Contains(err.Error(), AuthKeyEnv) {
+		t.Fatalf("Parse error = %v, want one naming %s", err, AuthKeyEnv)
+	}
+	if strings.Contains(err.Error(), "env-shared-key") || strings.Contains(err.Error(), "k-alice") {
+		t.Errorf("error leaks a key: %v", err)
+	}
+}
+
+// P0.5: health_path is appended to base_url, so it must start with "/".
+func TestValidateHealthPath(t *testing.T) {
+	for path, wantErr := range map[string]bool{"/health": false, "/v1/models": false, "health": true, "models": true} {
+		yaml := "upstreams:\n  local:\n    base_url: \"http://127.0.0.1:1\"\n    health_path: \"" + path + "\"\n"
+		if _, err := Parse([]byte(yaml)); (err != nil) != wantErr {
+			t.Errorf("health_path %q: Parse error = %v, wantErr %t", path, err, wantErr)
+		}
 	}
 }

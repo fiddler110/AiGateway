@@ -110,8 +110,8 @@ type GatewaySettings struct {
 	// X-Forwarded-For entries are believed. Empty means XFF is ignored.
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	// TrustProxyHeaders is the removed boolean predecessor of TrustedProxies.
-	// It is decoded only so Validate can reject it with a pointer to
-	// trusted_proxies instead of a generic unknown-field error.
+	// It is decoded only so Validate can warn on false and reject true with a
+	// pointer to trusted_proxies, instead of a generic unknown-field error.
 	TrustProxyHeaders *bool `yaml:"trust_proxy_headers"`
 
 	// TrustedProxyPrefixes is TrustedProxies parsed by Validate. A config
@@ -130,6 +130,11 @@ type Config struct {
 	Cache            CacheConfig               `yaml:"cache"`
 	Redis            RedisConfig               `yaml:"redis"`
 	Resilience       ResilienceConfig          `yaml:"resilience"`
+
+	// Warnings are non-fatal problems found by Validate, such as settings
+	// that are accepted but have no effect yet (P0.15). The caller logs
+	// them at startup. They name settings, never values.
+	Warnings []string `yaml:"-"`
 }
 
 // Defaults applies the gateway's documented default values to a freshly
@@ -153,7 +158,9 @@ func Defaults() Config {
 			StreamTimeout:    600.0,
 		},
 		Cache: CacheConfig{
-			Enabled:    true,
+			// Off until P2.1: sharing cached responses across clients is a
+			// data-sharing decision the operator should make explicitly.
+			Enabled:    false,
 			TTLSeconds: 300,
 			MaxEntries: 1000,
 			Semantic: SemanticCacheConfig{
