@@ -35,8 +35,8 @@ var (
 	privateIPv4 = regexp.MustCompile(`\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})\b`)
 	cidrSuffix  = regexp.MustCompile(`\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})/\d{1,2}\b`)
 
-	privateIPv6ULA        = regexp.MustCompile(`(?i)\bfd[0-9a-f]{2}(?::[0-9a-f]{0,4}){1,7}\b`)
-	privateIPv6LinkLocal  = regexp.MustCompile(`(?i)\bfe80(?::[0-9a-f]{0,4}){1,7}\b`)
+	privateIPv6ULA       = regexp.MustCompile(`(?i)\bfd[0-9a-f]{2}(?::[0-9a-f]{0,4}){1,7}\b`)
+	privateIPv6LinkLocal = regexp.MustCompile(`(?i)\bfe80(?::[0-9a-f]{0,4}){1,7}\b`)
 
 	// Password/secret/token assignment: key = value, value 4+ chars, not
 	// starting with an obvious placeholder prefix (checked post-match,

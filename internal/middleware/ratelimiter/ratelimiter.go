@@ -16,7 +16,7 @@ import (
 const window = 60 * time.Second
 
 type Middleware struct {
-	rpm                int
+	rpm                 int
 	useSourceIPFallback bool
 	now                 func() time.Time // injectable for tests
 

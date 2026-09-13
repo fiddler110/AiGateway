@@ -52,8 +52,8 @@ func TestBudgetEnforced(t *testing.T) {
 func TestExactModelMatchBeatsSubstring(t *testing.T) {
 	mw, err := New(map[string]any{
 		"pricing": map[string]any{
-			"gpt-4":   map[string]any{"prompt_per_1k": 1.0},
-			"gpt-4o":  map[string]any{"prompt_per_1k": 2.0},
+			"gpt-4":  map[string]any{"prompt_per_1k": 1.0},
+			"gpt-4o": map[string]any{"prompt_per_1k": 2.0},
 		},
 	})
 	if err != nil {

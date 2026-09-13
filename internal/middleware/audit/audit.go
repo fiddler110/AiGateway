@@ -38,12 +38,12 @@ func (m *Middleware) Process(_ context.Context, req *chatmodel.ChatRequest, gctx
 	gctx.ClientID = chatmodel.SanitizeClientID(gctx.ClientID)
 
 	entry := map[string]any{
-		"client_id":      gctx.ClientID,
-		"model":          req.Model,
-		"message_count":  len(req.Messages),
-		"upstream":       gctx.Upstream,
-		"stream":         req.Stream,
-		"source_ip":      gctx.SourceIP,
+		"client_id":     gctx.ClientID,
+		"model":         req.Model,
+		"message_count": len(req.Messages),
+		"upstream":      gctx.Upstream,
+		"stream":        req.Stream,
+		"source_ip":     gctx.SourceIP,
 	}
 	slog.Info("audit", "client_id", gctx.ClientID, "model", req.Model, "upstream", gctx.Upstream, "source_ip", gctx.SourceIP)
 

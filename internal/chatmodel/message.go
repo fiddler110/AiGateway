@@ -9,9 +9,9 @@ import "encoding/json"
 // preserved verbatim in Extra so multi-turn tool-call transcripts round-trip
 // losslessly through the gateway.
 type ChatMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content,omitempty"`
-	Name    string          `json:"name,omitempty"`
+	Role    string                     `json:"role"`
+	Content json.RawMessage            `json:"content,omitempty"`
+	Name    string                     `json:"name,omitempty"`
 	Extra   map[string]json.RawMessage `json:"-"`
 }
 
@@ -74,11 +74,11 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // ChatRequest mirrors an OpenAI /v1/chat/completions request body. Unknown
 // top-level fields (tools, tool_choice, thinking, etc.) are preserved in Extra.
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ChatMessage   `json:"messages"`
-	Stream      bool            `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
+	Model       string                     `json:"model"`
+	Messages    []ChatMessage              `json:"messages"`
+	Stream      bool                       `json:"stream,omitempty"`
+	Temperature *float64                   `json:"temperature,omitempty"`
+	MaxTokens   *int                       `json:"max_tokens,omitempty"`
 	Extra       map[string]json.RawMessage `json:"-"`
 }
 

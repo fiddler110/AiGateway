@@ -6,12 +6,12 @@ import (
 )
 
 var errorTypes = map[int]string{
-	http.StatusBadRequest:          "invalid_request_error",
-	http.StatusUnauthorized:        "authentication_error",
-	http.StatusForbidden:           "permission_error",
-	http.StatusNotFound:            "not_found_error",
+	http.StatusBadRequest:            "invalid_request_error",
+	http.StatusUnauthorized:          "authentication_error",
+	http.StatusForbidden:             "permission_error",
+	http.StatusNotFound:              "not_found_error",
 	http.StatusRequestEntityTooLarge: "invalid_request_error",
-	http.StatusTooManyRequests:     "rate_limit_error",
+	http.StatusTooManyRequests:       "rate_limit_error",
 }
 
 // WriteError writes an OpenAI-compatible error envelope

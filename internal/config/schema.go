@@ -50,10 +50,10 @@ type HealthCheckConfig struct {
 }
 
 type ResilienceConfig struct {
-	RetryAttempts      int                  `yaml:"retry_attempts"`
-	RetryDelaySeconds  float64              `yaml:"retry_delay_seconds"`
-	CircuitBreaker     CircuitBreakerConfig `yaml:"circuit_breaker"`
-	HealthCheck        HealthCheckConfig    `yaml:"health_check"`
+	RetryAttempts     int                  `yaml:"retry_attempts"`
+	RetryDelaySeconds float64              `yaml:"retry_delay_seconds"`
+	CircuitBreaker    CircuitBreakerConfig `yaml:"circuit_breaker"`
+	HealthCheck       HealthCheckConfig    `yaml:"health_check"`
 }
 
 type SemanticCacheConfig struct {
@@ -65,10 +65,10 @@ type SemanticCacheConfig struct {
 }
 
 type CacheConfig struct {
-	Enabled     bool                `yaml:"enabled"`
-	TTLSeconds  int                 `yaml:"ttl_seconds"`
-	MaxEntries  int                 `yaml:"max_entries"`
-	Semantic    SemanticCacheConfig `yaml:"semantic"`
+	Enabled    bool                `yaml:"enabled"`
+	TTLSeconds int                 `yaml:"ttl_seconds"`
+	MaxEntries int                 `yaml:"max_entries"`
+	Semantic   SemanticCacheConfig `yaml:"semantic"`
 }
 
 type RedisConfig struct {
@@ -79,17 +79,17 @@ type RedisConfig struct {
 
 // GatewaySettings holds gateway-wide operational settings.
 type GatewaySettings struct {
-	ListenPort        int     `yaml:"listen_port"`
-	ListenHost        string  `yaml:"listen_host"`
-	DefaultUpstream   string  `yaml:"default_upstream"`
-	AuditDB           string  `yaml:"audit_db"`
-	RequestTimeout    float64 `yaml:"request_timeout"`
-	RetentionDays     int     `yaml:"retention_days"`
+	ListenPort        int           `yaml:"listen_port"`
+	ListenHost        string        `yaml:"listen_host"`
+	DefaultUpstream   string        `yaml:"default_upstream"`
+	AuditDB           string        `yaml:"audit_db"`
+	RequestTimeout    float64       `yaml:"request_timeout"`
+	RetentionDays     int           `yaml:"retention_days"`
 	LogLevel          string        `yaml:"log_level"`
 	AuthKey           secret.String `yaml:"auth_key"`
-	MaxRequestBytes   int64   `yaml:"max_request_bytes"`
-	StreamBuffer      bool    `yaml:"stream_buffer"`
-	TrustProxyHeaders bool    `yaml:"trust_proxy_headers"`
+	MaxRequestBytes   int64         `yaml:"max_request_bytes"`
+	StreamBuffer      bool          `yaml:"stream_buffer"`
+	TrustProxyHeaders bool          `yaml:"trust_proxy_headers"`
 }
 
 // Config is the top-level gateway configuration, loaded from YAML.

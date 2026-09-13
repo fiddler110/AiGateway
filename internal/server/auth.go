@@ -11,9 +11,9 @@ import (
 
 // AuthResult carries the outcome of authenticating one request.
 type AuthResult struct {
-	ClientID           string
+	ClientID               string
 	UpstreamKeyEnvOverride string
-	UpstreamOverride   string
+	UpstreamOverride       string
 }
 
 // bearerOrGatewayKey extracts the presented credential from either the
