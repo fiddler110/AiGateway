@@ -1,8 +1,40 @@
+# Build output
 /aigateway
 /aigateway.exe
+/dist/
+/bin/
+*.exe
+*.test
+*.out
+
+# Test / coverage artifacts
+coverage.*
+*.coverprofile
+/testdata/fuzz/**/corpus-local/
+
+# Runtime data (audit DB, logs)
 /logs/
 *.db
 *.db-wal
 *.db-shm
+*.log
+
+# Local config and secrets — never commit real keys
 config.yaml
+!config/aigateway.blank.yaml
 .env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code local (per-machine) settings; CLAUDE.md itself IS committed
+.claude/settings.local.json
