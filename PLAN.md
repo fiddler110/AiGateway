@@ -19,12 +19,19 @@ existing items; append new ones at the end of their phase.
 at the end of any session that leaves work unfinished.*
 
 - **Last updated:** 2026-09-12
-- **State:** Plan reviewed and expanded; no Phase 0b fixes started. All
-  existing tests pass; `gofmt -l` lists 10 files.
-- **Next up:** M1. Suggested first steps: `gofmt -w .` + `go mod tidy`
-  (mechanical, separate commit) → P3.5 fake-upstream harness → P0.1 → P0.2.
+- **State:** On branch `m1/trustworthy-core` (uncommitted as of this note):
+  `gofmt -w .` + `go mod tidy` done; P3.5, P0.1, P0.2 done. Wiring moved
+  from `cmd/aigateway` into `internal/app` so tests serve the real router;
+  `config.Parse` added for inline-YAML configs. `go test ./...` passes;
+  `-race` not run (no cgo on this machine).
+- **Next up:** P0.3 → P0.4 (both reshape the stream handlers; do together),
+  then P0.5 onward.
 - **In progress:** none.
-- **Open questions for the user:** none.
+- **Open questions for the user:** commit split (suggest: formatting/tidy
+  commit, then harness + P0.1 + P0.2). P4.15 (upstream 401/403 → 502) is a
+  judgement call worth a glance.
+- **Test note:** keep `retry_attempts: 0` in harness configs until P0.6;
+  the hardcoded backoff still sleeps 1s after the final attempt.
 
 ---
 
@@ -137,8 +144,8 @@ just file existence):
 `tokenratelimiter`, `audit`, `chatmodel`, `config`, `pipeline`, `provider/openai`,
 `secret`, `upstream`, `server`, and `handlers` have no tests. `web/` is an
 empty placeholder directory. `go.mod` has exactly two dependencies (`chi`,
-`yaml.v3`), both currently mis-marked `// indirect` — run `go mod tidy`. Keep
-the dependency surface this small deliberately (see P4.10).
+`yaml.v3`); the stray `// indirect` markers were removed by `go mod tidy` on
+2026-09-12. Keep the dependency surface this small deliberately (see P4.10).
 
 ---
 
@@ -148,8 +155,12 @@ Found by a source review on 2026-09-12. These are ordered by severity; the
 first four break normal traffic and should be fixed before any Phase 1 work.
 Each should land with a regression test.
 
-- [ ] **P0.1 — Non-streaming upstream bodies are read after their context is
-  cancelled.** `upstream.forward` (`forward.go:79-87`) creates a
+- [x] **P0.1 — Non-streaming upstream bodies are read after their context is
+  cancelled.** *Done 2026-09-12: `forward` now reads the body inside its
+  timeout context and returns status/header/body. Verified by:
+  `upstream.TestSendReadsBodyThatArrivesAfterHeaders` and
+  `handlers.TestChatNonStreamingBodyAfterHeaders` (both fail with `context
+  canceled` when the read is moved after `cancel()`).* `upstream.forward` (`forward.go:79-87`) creates a
   `context.WithTimeout` and `defer cancel()`s it, then returns the
   `*http.Response`; `Manager.Send` reads the body afterwards
   (`readAndClose`). Cancelling a request's context aborts its body read, so
@@ -161,8 +172,19 @@ Each should land with a regression test.
   before returning (return `[]byte` + status + headers), or hand the cancel
   func to the caller to invoke after the body is closed. **Test:** fake
   upstream that flushes headers then delays the body.
-- [ ] **P0.2 — Upstream HTTP status is discarded; 4xx errors reach clients as
-  200.** `Manager.Send` returns only `(body, usage, servedBy, err)`, and
+- [x] **P0.2 — Upstream HTTP status is discarded; 4xx errors reach clients as
+  200.** *Done 2026-09-12: `Send` returns `upstream.Result` and `SendStream`
+  returns `upstream.StreamResult`, both carrying status + headers; 4xx is not
+  retried or counted against the breaker; 1xx/3xx now count as failures like
+  5xx. `handlers.writeUpstreamError` relays the status with the gateway
+  envelope, taking only a ≤1KiB message from the upstream body (OpenAI,
+  Ollama, and bare-`message` shapes; non-JSON bodies aren't reflected),
+  passes `Retry-After` on 429, and skips the response pipeline. Streaming 4xx
+  is sent as a JSON error, not a 200 SSE stream. 401/403/407 map to 502, see
+  P4.15. Verified by: `upstream.TestSendReturnsClientErrorStatus`,
+  `TestSendStreamReturnsClientErrorStatus`, and
+  `handlers.TestChatRelaysUpstreamClientErrors` (10 subtests: stream and
+  non-stream; all fail with the handler relay disabled).* `Manager.Send` returns only `(body, usage, servedBy, err)`, and
   `handlers.Chat` always writes the body with an implicit 200
   (`chat.go:110-111`). An upstream 400/401/404/429 therefore arrives at the
   client as a 200 whose body is an error object — clients that retry on 429
@@ -224,6 +246,9 @@ Each should land with a regression test.
   exposing internal topology — the exact class of data
   `context_pseudonymizer` exists to protect. **Fix:** clients get a generic
   message plus a request ID (P1.8); full detail goes to the server log only.
+  *Partial (2026-09-12, with P0.2): `SendStream` no longer puts the 5xx body
+  in its error (`TestSendStreamServerErrorIsFailure`). Net-error URLs still
+  reach clients via `err.Error()`.*
 - [ ] **P0.9 — Unbounded memory on upstream responses.** Buffered stream mode
   does `io.ReadAll` on the upstream stream (`chat.go:158`) and `Send` does
   `io.ReadAll` on non-streaming bodies, with no limit — a misbehaving or
@@ -304,7 +329,9 @@ Each should land with a regression test.
     containing source IPs — keep the handle open, use `0o640`.
   - The half-open probe slot is released *before* the failure is recorded in
     `Send` (`manager.go:170-175`), letting a second probe slip through.
-    Release after recording.
+    Release after recording. *Code reordered 2026-09-12 during P0.2 (both
+    `Send` and `SendStream` now record, then release); the concurrency test
+    is still owed.*
   - `ReverseSubstitute` and `buildSubstituter` re-sort keys and do
     O(keys × text) `strings.ReplaceAll` passes per call — per SSE line in
     passthrough mode. Build a `strings.Replacer` once per request.
@@ -645,9 +672,8 @@ hit immediately.
   N goroutines sending requests while another swaps state in a loop.
 - [ ] **P3.3 — CI pipeline.** Build, `go vet`, `golangci-lint`, `go test
   -race ./...`, `govulncheck` (see P4.10).
-  *Concretely:* GitHub Actions on Linux; `gofmt -l` must be empty (10 files
-  currently fail it, e.g. `schema.go`, `auth.go`, `errors.go`, `manager.go` —
-  run `gofmt -w .` as the first CI commit); golangci-lint with at least `errcheck`, `gosec`,
+  *Concretely:* GitHub Actions on Linux; `gofmt -l` must be empty (clean
+  since `gofmt -w .` on 2026-09-12); golangci-lint with at least `errcheck`, `gosec`,
   `bodyclose`, `contextcheck`, `noctx`, `staticcheck` — `bodyclose` and
   `contextcheck` would have flagged P0.1-class bugs; cross-compile matrix
   (`linux/amd64`, `linux/arm64` for Raspberry Pi homelabs, `windows/amd64`,
@@ -674,7 +700,15 @@ hit immediately.
   exit 0/1) for use in CI and before restarts, and a `--version` flag with
   build info embedded via `-ldflags`. Release binaries with checksums
   (GoReleaser or a plain Makefile target — decide under P4.10).
-- [ ] **P3.5 — Fake-upstream test harness.** A reusable `internal/testutil`
+- [x] **P3.5 — Fake-upstream test harness.** *Done 2026-09-12:
+  `internal/testutil`. `NewFakeUpstream(t, script...)` provides scripted
+  `Response`s (status, headers, header/body delays, per-flush `Chunks`,
+  `Disconnect`), request recording, and the builders `OpenAIChat`,
+  `OpenAIError`, `OpenAISSE`, `AnthropicMessage`, `AnthropicSSE`,
+  `OversizedChat`. `NewGateway(t, yaml)` serves the real `app.NewRouter`.
+  Packages that `app` imports (e.g. `upstream`) must use external `_test`
+  packages to import `testutil`. Verified by: `testutil` self-tests (script
+  order, delays, disconnect truncation) plus the P0.1/P0.2 tests built on it.* A reusable `internal/testutil`
   package: an `httptest.Server` that scripts OpenAI- and Anthropic-shaped
   responses (fixed JSON, SSE sequences with controllable chunk boundaries
   and delays, 4xx/5xx, mid-stream disconnect, slow headers, oversized
@@ -843,6 +877,18 @@ modifies.
   `settings.allow_unauthenticated_network_access: true` is set explicitly.
   Also change the shipped default `listen_host` to `127.0.0.1`; containers
   override it in their own manifests (P3.4).
+- [x] **P4.15 — Upstream 4xx relayed with status but a normalized body;
+  upstream auth failures become 502 (see P0.2).** The Python reference
+  relays 4xx bodies verbatim (`main.py` passthrough; `proxy.py` wraps them in
+  a 200 SSE event when streaming). Go instead relays the status with only a
+  bounded message string, so proxy HTML pages and oversized bodies aren't
+  reflected. Upstream 401/403/407 means the *gateway's* `api_key_env`
+  credential was rejected, not the client's. Relaying 401 would make clients
+  think their gateway key is wrong, and OpenAI's 401 message quotes a
+  fragment of the rejected key. The client gets a generic 502 and the server
+  log gets the upstream name and status. Upstream messages echoing
+  pseudonymized request text are not reverse-substituted (the client sees
+  fake values); revisit with P0.4.
 
 ---
 

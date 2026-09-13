@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -67,10 +68,19 @@ type UpstreamRequest struct {
 	Path     string // resolved path (already applied chatPath/defaultPath logic)
 }
 
-// forward makes one non-streaming POST to the upstream and returns the raw
-// HTTP response for the caller to inspect (status code drives retry/circuit
-// decisions one layer up).
-func forward(ctx context.Context, client *http.Client, r UpstreamRequest) (*http.Response, error) {
+// forwardResult is a fully read non-streaming upstream response.
+type forwardResult struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+// forward makes one non-streaming POST to the upstream and reads the whole
+// body before returning. The body must be read here, inside the per-upstream
+// timeout context: cancelling that context (the deferred cancel) aborts any
+// body read still in progress, so returning the *http.Response and reading
+// it in the caller fails whenever the body arrives after the headers (P0.1).
+func forward(ctx context.Context, client *http.Client, r UpstreamRequest) (forwardResult, error) {
 	url := strings.TrimRight(r.Upstream.BaseURL, "/") + r.Path
 	timeout := time.Duration(r.Upstream.Timeout) * time.Second
 	if timeout <= 0 {
@@ -81,10 +91,19 @@ func forward(ctx context.Context, client *http.Client, r UpstreamRequest) (*http
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(r.Body))
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return forwardResult{}, fmt.Errorf("build request: %w", err)
 	}
 	buildHeaders(httpReq, r.Upstream, r.APIKey)
-	return client.Do(httpReq)
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return forwardResult{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return forwardResult{}, fmt.Errorf("read response body: %w", err)
+	}
+	return forwardResult{status: resp.StatusCode, header: resp.Header, body: body}, nil
 }
 
 // forwardStream makes one streaming POST; the read timeout is intentionally

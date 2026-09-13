@@ -69,9 +69,9 @@ func (m *Manager) WithMergedConfig(cfg *config.Config, client *http.Client, regi
 // Status reports {healthy, circuit, failures} per upstream for /health and
 // /metrics.
 type UpstreamStatus struct {
-	Healthy bool   `json:"healthy"`
-	Circuit string `json:"circuit"`
-	Failures int   `json:"failures"`
+	Healthy  bool   `json:"healthy"`
+	Circuit  string `json:"circuit"`
+	Failures int    `json:"failures"`
 }
 
 func (m *Manager) Status() map[string]UpstreamStatus {
@@ -118,6 +118,32 @@ func (m *Manager) isAvailable(e *entry, now time.Time) (available bool, halfOpen
 
 var ErrAllUpstreamsUnavailable = errors.New("all upstreams unavailable")
 
+// maxErrorBodyBytes bounds how much of an upstream error body is read. Error
+// bodies are only mined for a short message, never relayed whole.
+const maxErrorBodyBytes = 64 * 1024
+
+// isUpstreamFailure reports whether a response status counts against the
+// upstream's circuit breaker and triggers retry/fallback. 4xx responses are
+// the upstream correctly rejecting this request (bad input, rate limit,
+// unknown model), so they are relayed to the client instead: retrying them
+// elsewhere would hide the real error. Anything that is neither 2xx nor 4xx
+// (5xx, or a 1xx/3xx the client didn't resolve) is a failure.
+func isUpstreamFailure(status int) bool {
+	return status < 200 || (status >= 300 && status < 400) || status >= 500
+}
+
+// Result is a completed non-streaming upstream call. Status is always 2xx or
+// 4xx: failures are retried or reported as an error instead.
+type Result struct {
+	Status int
+	Header http.Header
+	// Body is the canonical OpenAI-shaped response for a 2xx, or the
+	// upstream's untranslated error body for a 4xx.
+	Body     []byte
+	Usage    provider.Usage
+	ServedBy string
+}
+
 // translatorFor resolves the Translator for an upstream's configured
 // api_format, defaulting to openai (identity) if unset/unknown.
 func (m *Manager) translatorFor(cfg config.UpstreamConfig) provider.Translator {
@@ -132,12 +158,10 @@ func (m *Manager) translatorFor(cfg config.UpstreamConfig) provider.Translator {
 }
 
 // Send performs a non-streaming chat call, trying candidates in fallback
-// order. A response status < 500 counts as success for circuit-breaker
-// purposes (2xx and 4xx client errors like 400/401/429 are NOT upstream
-// failures — only 5xx and network errors are). Returns the canonical
-// OpenAI-shaped response body, usage, and the name of the upstream that
-// actually served the request.
-func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.ChatRequest, apiKeyFor func(upstreamName string) string) (body []byte, usage provider.Usage, servedBy string, err error) {
+// order. Only failure statuses (see isUpstreamFailure) and network errors
+// count against the circuit breaker; a 4xx is returned to the caller with
+// its status so the client sees the upstream's real answer (P0.2).
+func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.ChatRequest, apiKeyFor func(upstreamName string) string) (Result, error) {
 	var lastErr error
 	for _, name := range candidates {
 		e, ok := m.entries[name]
@@ -158,53 +182,56 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 				if halfOpen {
 					e.circuit.ReleaseHalfOpenProbe()
 				}
-				return nil, provider.Usage{}, "", fmt.Errorf("translate request for %s: %w", name, terr)
+				return Result{}, fmt.Errorf("translate request for %s: %w", name, terr)
 			}
 
-			resp, ferr := forward(ctx, m.client, UpstreamRequest{
+			res, ferr := forward(ctx, m.client, UpstreamRequest{
 				Upstream: e.cfg,
 				APIKey:   apiKeyFor(name),
 				Body:     nativeBody,
 				Path:     chatPath(e.cfg, defaultPath),
 			})
-			if halfOpen {
-				e.circuit.ReleaseHalfOpenProbe()
+			if ferr == nil && isUpstreamFailure(res.status) {
+				ferr = fmt.Errorf("upstream %s returned status %d", name, res.status)
 			}
-
 			if ferr != nil {
 				e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
+				if halfOpen {
+					e.circuit.ReleaseHalfOpenProbe()
+				}
 				lastErr = ferr
 				m.backoff(ctx, attempt)
 				continue
 			}
 
-			respBody, rerr := readAndClose(resp)
-			if rerr != nil {
-				e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
-				lastErr = rerr
-				m.backoff(ctx, attempt)
-				continue
-			}
-
-			if resp.StatusCode >= 500 {
-				e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
-				lastErr = fmt.Errorf("upstream %s returned status %d", name, resp.StatusCode)
-				m.backoff(ctx, attempt)
-				continue
-			}
-
 			e.circuit.RecordSuccess()
-			openaiBody, u, terr := translator.FromUpstream(respBody)
-			if terr != nil {
-				return nil, provider.Usage{}, "", fmt.Errorf("translate response from %s: %w", name, terr)
+			if res.status >= 400 {
+				return Result{Status: res.status, Header: res.header, Body: res.body, ServedBy: name}, nil
 			}
-			return openaiBody, u, name, nil
+			openaiBody, u, terr := translator.FromUpstream(res.body)
+			if terr != nil {
+				return Result{}, fmt.Errorf("translate response from %s: %w", name, terr)
+			}
+			return Result{Status: res.status, Header: res.header, Body: openaiBody, Usage: u, ServedBy: name}, nil
 		}
 	}
 	if lastErr != nil {
-		return nil, provider.Usage{}, "", fmt.Errorf("%w: %v", ErrAllUpstreamsUnavailable, lastErr)
+		return Result{}, fmt.Errorf("%w: %v", ErrAllUpstreamsUnavailable, lastErr)
 	}
-	return nil, provider.Usage{}, "", ErrAllUpstreamsUnavailable
+	return Result{}, ErrAllUpstreamsUnavailable
+}
+
+// StreamResult is a streaming upstream call whose headers have arrived.
+// Exactly one of Body (2xx) or ErrorBody (4xx) is set.
+type StreamResult struct {
+	Status int
+	Header http.Header
+	// Body is the live upstream stream; the caller must close it.
+	Body io.ReadCloser
+	// ErrorBody is the upstream's error body, read to at most
+	// maxErrorBodyBytes, with the connection already closed.
+	ErrorBody []byte
+	ServedBy  string
 }
 
 // SendStream performs a streaming chat call, trying candidates in fallback
@@ -218,7 +245,7 @@ func (m *Manager) Send(ctx context.Context, candidates []string, req *chatmodel.
 // fed back into the circuit breaker, since retrying isn't safe at that point
 // and it's a distinct failure mode (dropped connection) from "is this
 // upstream reachable."
-func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chatmodel.ChatRequest, apiKeyFor func(upstreamName string) string) (io.ReadCloser, string, error) {
+func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chatmodel.ChatRequest, apiKeyFor func(upstreamName string) string) (StreamResult, error) {
 	var lastErr error
 	for _, name := range candidates {
 		e, ok := m.entries[name]
@@ -238,7 +265,7 @@ func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chat
 			if halfOpen {
 				e.circuit.ReleaseHalfOpenProbe()
 			}
-			return nil, "", fmt.Errorf("translate request for %s: %w", name, terr)
+			return StreamResult{}, fmt.Errorf("translate request for %s: %w", name, terr)
 		}
 
 		resp, ferr := forwardStream(ctx, m.client, UpstreamRequest{
@@ -247,38 +274,36 @@ func (m *Manager) SendStream(ctx context.Context, candidates []string, req *chat
 			Body:     nativeBody,
 			Path:     chatPath(e.cfg, defaultPath),
 		})
+		if ferr == nil && isUpstreamFailure(resp.StatusCode) {
+			// The body is drained (bounded) for connection reuse but never
+			// put in the error: it can carry internal detail (P0.8).
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
+			resp.Body.Close()
+			ferr = fmt.Errorf("upstream %s returned status %d", name, resp.StatusCode)
+		}
 		if ferr != nil {
+			e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
 			if halfOpen {
 				e.circuit.ReleaseHalfOpenProbe()
 			}
-			e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
 			lastErr = ferr
 			continue
 		}
 
-		if resp.StatusCode >= 500 {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if halfOpen {
-				e.circuit.ReleaseHalfOpenProbe()
-			}
-			e.circuit.RecordFailure(m.resilience.CircuitBreaker.FailureThreshold, cooldown(m.resilience), now)
-			lastErr = fmt.Errorf("upstream %s returned status %d: %s", name, resp.StatusCode, string(body))
-			continue
-		}
-
-		// Headers received and status < 500: record success now, before any
-		// body byte is read (see doc comment above for why).
+		// Headers received and not a failure status: record success now,
+		// before any body byte is read (see doc comment above for why).
 		e.circuit.RecordSuccess()
-		if halfOpen {
-			e.circuit.ReleaseHalfOpenProbe()
+		if resp.StatusCode >= 400 {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+			resp.Body.Close()
+			return StreamResult{Status: resp.StatusCode, Header: resp.Header, ErrorBody: errBody, ServedBy: name}, nil
 		}
-		return resp.Body, name, nil
+		return StreamResult{Status: resp.StatusCode, Header: resp.Header, Body: resp.Body, ServedBy: name}, nil
 	}
 	if lastErr != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrAllUpstreamsUnavailable, lastErr)
+		return StreamResult{}, fmt.Errorf("%w: %v", ErrAllUpstreamsUnavailable, lastErr)
 	}
-	return nil, "", ErrAllUpstreamsUnavailable
+	return StreamResult{}, ErrAllUpstreamsUnavailable
 }
 
 func cooldown(r config.ResilienceConfig) time.Duration {
@@ -294,9 +319,4 @@ func (m *Manager) backoff(ctx context.Context, attempt int) {
 	case <-time.After(delay):
 	case <-ctx.Done():
 	}
-}
-
-func readAndClose(resp *http.Response) ([]byte, error) {
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
 }

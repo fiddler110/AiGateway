@@ -86,7 +86,7 @@ func Chat(srv *server.Server) http.HandlerFunc {
 			defer cancel()
 		}
 
-		body, _, servedBy, err := st.UpstreamMgr.Send(ctx, candidates, &req, apiKeyFor)
+		res, err := st.UpstreamMgr.Send(ctx, candidates, &req, apiKeyFor)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				server.WriteError(w, http.StatusGatewayTimeout, "upstream request timed out")
@@ -95,9 +95,15 @@ func Chat(srv *server.Server) http.HandlerFunc {
 			server.WriteError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		gctx.Upstream = servedBy
+		gctx.Upstream = res.ServedBy
+		if res.Status >= 400 {
+			// Error bodies aren't model output, so the response pipeline
+			// doesn't run over them.
+			writeUpstreamError(w, res.ServedBy, res.Status, res.Header, res.Body)
+			return
+		}
 
-		body, err = applyResponsePipeline(r.Context(), st.Pipeline, gctx, body)
+		body, err := applyResponsePipeline(r.Context(), st.Pipeline, gctx, res.Body)
 		if err != nil {
 			server.WriteError(w, http.StatusInternalServerError, "internal middleware error")
 			return
@@ -131,7 +137,7 @@ func serveStream(w http.ResponseWriter, r *http.Request, gctx *pipeline.GatewayC
 		return
 	}
 
-	body, servedBy, err := st.UpstreamMgr.SendStream(r.Context(), candidates, req, apiKeyFor)
+	res, err := st.UpstreamMgr.SendStream(r.Context(), candidates, req, apiKeyFor)
 	if err != nil {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -139,7 +145,14 @@ func serveStream(w http.ResponseWriter, r *http.Request, gctx *pipeline.GatewayC
 		flusher.Flush()
 		return
 	}
-	gctx.Upstream = servedBy
+	gctx.Upstream = res.ServedBy
+	if res.Body == nil {
+		// Nothing has been written yet, so a 4xx can still go out as a plain
+		// JSON error with the upstream's status instead of a 200 stream.
+		writeUpstreamError(w, res.ServedBy, res.Status, res.Header, res.ErrorBody)
+		return
+	}
+	body := res.Body
 	defer body.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")

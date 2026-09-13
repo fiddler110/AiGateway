@@ -88,8 +88,6 @@ go run ./cmd/aigateway -config config.yaml
 
 ## Known traps (as of 2026-09-12; remove each as it's fixed)
 
-- `upstream.forward` cancels its context before the body is read, so non-streaming
-  requests fail (P0.1).
 - Several config fields are accepted but do nothing yet: `cache`, `redis`, `audit_db`,
   `health_check`, `retry_delay_seconds` (P0.15). Don't assume a config key means the
   feature exists.
