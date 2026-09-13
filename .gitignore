@@ -1,0 +1,8 @@
+/aigateway
+/aigateway.exe
+/logs/
+*.db
+*.db-wal
+*.db-shm
+config.yaml
+.env

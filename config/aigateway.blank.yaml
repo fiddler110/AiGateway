@@ -1,0 +1,83 @@
+# AiGateway configuration template.
+#
+# Ships blank by design: with no upstreams configured, every chat request
+# returns a clear 400 explaining how to configure a route, rather than
+# silently routing somewhere. Uncomment and adapt the examples below.
+
+upstreams: {}
+  # openai:
+  #   base_url: "https://api.openai.com/v1"
+  #   api_key_env: "OPENAI_API_KEY"
+  #   auth_type: bearer
+  #   api_format: openai
+  #   models: ["gpt-4o", "gpt-4o-mini"]
+  # anthropic:
+  #   base_url: "https://api.anthropic.com/v1"
+  #   api_key_env: "ANTHROPIC_API_KEY"
+  #   api_format: anthropic
+  #   models: ["claude-opus-4", "claude-sonnet-4"]
+  # gemini:
+  #   base_url: "https://generativelanguage.googleapis.com/v1beta"
+  #   api_key_env: "GEMINI_API_KEY"
+  #   api_format: gemini
+  #   models: ["gemini-2.5-pro"]
+  # ollama:
+  #   base_url: "http://localhost:11434/v1"
+  #   api_key_env: ""
+  #   auth_type: none
+  #   api_format: openai
+
+model_routes: []
+  # - pattern: "gpt-*"
+  #   upstreams: ["openai"]
+  # - pattern: "claude-*"
+  #   upstreams: ["anthropic"]
+
+middleware: []
+  # - audit_log
+  # - secrets_scanner
+  # - context_pseudonymizer
+  # - pii_redactor
+  # - content_policy
+  # - rate_limiter
+  # - token_rate_limiter
+  # - cost_tracker
+  # - token_counter
+
+middleware_config: {}
+
+settings:
+  listen_port: 8080
+  listen_host: "0.0.0.0"
+  # default_upstream: "openai"
+  audit_db: "logs/gateway.db"
+  request_timeout: 300.0
+  retention_days: 90
+  log_level: info
+  # auth_key: "changeme"
+  max_request_bytes: 10485760
+  stream_buffer: false
+  trust_proxy_headers: false
+
+users: {}
+
+cache:
+  enabled: true
+  ttl_seconds: 300
+  max_entries: 1000
+  semantic:
+    enabled: false
+
+redis:
+  enabled: false
+
+resilience:
+  retry_attempts: 2
+  retry_delay_seconds: 1.0
+  circuit_breaker:
+    failure_threshold: 5
+    cooldown_seconds: 60
+  health_check:
+    enabled: true
+    interval_seconds: 30
+    timeout_seconds: 5
